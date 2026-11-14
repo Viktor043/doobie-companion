@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 0.2
+//  DOOBIE COMPANION, firmware 0.3
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64 (V1, 280x456 AMOLED, CO5300/SH8601)
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -10,7 +10,10 @@
 //    lib  "GFX Library for Arduino"@1.5.6     core esp32:esp32@3.1.3
 //
 //  First boot runs onboarding: boot sweep, hello, light/dark choice, tilt and
-//  tap tutorial. The result is saved in NVS.
+//  profile questions (he/she/skip, under 18 / 18+, spicy opt-in for adults),
+//  tilt and tap tutorial. The result is saved in NVS.
+//  Optional mic: Adafruit PDM MEMS mic (#3492) on GPIO5 = CLK, GPIO6 = DAT,
+//  auto-detected at boot. Without it the noise reactions are simply off.
 //    BOOT short press : toggle light / dark
 //    BOOT hold 2 s    : run onboarding again
 // ============================================================================
@@ -18,6 +21,8 @@
 #include <font/glcdfont.h>   // classic 5x7 ASCII table, reused as a dot-matrix font
 #include <Wire.h>
 #include <Preferences.h>
+#include <ESP_I2S.h>
+#include <driver/gpio.h>
 #include "eyetypes.h"
 #include "phrases.h"
 
@@ -149,6 +154,48 @@ void touchRead() {
 }
 float batteryV() { return analogReadMilliVolts(PIN_BAT_ADC) * 3.0f / 1000.0f; }
 
+// --- PDM microphone (optional add-on). Level in dBFS, computed on core 0.
+#define MIC_CLK   5
+#define MIC_DATA  6
+#define MIC_LOUD_DB  (-38.0f)   // sustained loud (~80 dB SPL with MP34DT01, -26 dBFS @ 94 dB)
+#define MIC_QUIET_DB (-75.0f)   // near silence
+#define MIC_BANG_DB  (-28.0f)   // clap / bang peak
+I2SClass micI2S;
+volatile float micDb = -90, micPeakDb = -90;
+volatile bool micOk = false;
+void micTask(void *) {
+  static int16_t buf[256];
+  float dc = 0; uint32_t start = millis(); bool decided = false;
+  for (;;) {
+    size_t n = micI2S.readBytes((char *)buf, sizeof(buf)) / 2;
+    if (!n) { vTaskDelay(5); continue; }
+    double acc = 0; int16_t mn = 32767, mx = -32768;
+    for (size_t i = 0; i < n; i++) {
+      dc += (buf[i] - dc) * 0.002f;
+      float v = buf[i] - dc; acc += v * v;
+      if (buf[i] < mn) mn = buf[i]; if (buf[i] > mx) mx = buf[i];
+    }
+    float db = 20.0f * log10f(sqrtf(acc / n) / 32768.0f + 1e-7f);
+    micDb = db; if (db > micPeakDb) micPeakDb = db;
+    if (!decided) {
+      if (mx - mn > 8 && millis() - start > 300) { micOk = true; decided = true; Serial.println("Mic: detected"); }
+      else if (millis() - start > 2500) {
+        decided = true;
+        Serial.println("Mic: none (wire a PDM mic: GPIO5 CLK, GPIO6 DAT)");
+        micI2S.end(); vTaskDelete(NULL);
+      }
+    }
+  }
+}
+void micInit() {
+  micI2S.setPinsPdmRx(MIC_CLK, MIC_DATA);
+  if (!micI2S.begin(I2S_MODE_PDM_RX, 16000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
+    Serial.println("Mic: I2S init failed"); return;
+  }
+  gpio_pulldown_en((gpio_num_t)MIC_DATA);   // no mic -> constant bitstream -> detected as absent
+  xTaskCreatePinnedToCore(micTask, "mic", 4096, nullptr, 1, nullptr, 0);
+}
+
 // ============================================================================
 //  Dot rendering
 // ============================================================================
@@ -218,25 +265,52 @@ int dotText(const char *s, int visible, int x, int y, int pitch, float r, uint16
 // ============================================================================
 const char *speechText = nullptr;
 uint32_t speechStart = 0, nextIdleTalk = 25000;
-uint8_t recent[8]; uint8_t recentHead = 0;   // recently used (cat<<5 | index) to avoid repeats
+uint16_t recent[8]; uint8_t recentHead = 0;  // recently used lines (pointer hash) to avoid repeats
 
 uint32_t speechDuration(const char *s) { return strlen(s) * 38 + 1700 + 380; }
 bool speaking() { return speechText && millis() - speechStart < speechDuration(speechText); }
 
-void sayText(const char *s) { speechText = s; speechStart = millis(); }
-void say(Cat c, bool force = true) {
-  if (!force && speaking()) return;
-  const CatList &L = CATS[c];
-  uint8_t idx = random(L.n);
-  for (int tries = 0; tries < 6; tries++) {
-    uint8_t key = (c << 5) | (idx & 31);
-    bool used = false;
-    for (uint8_t k : recent) if (k == key) used = true;
-    if (!used) break;
-    idx = random(L.n);
+// ---------- user profile (set during onboarding) ----------
+uint8_t profSex = 2;            // 0 he, 1 she, 2 skip
+bool profAdult = false;         // under-18 profiles never see ADULT/SPICY lines
+bool profSpicy = false;         // adults opt in separately
+char speechBuf[72];
+
+const char *petName() {
+  if (!profAdult)   return PET_KID[random(4)];
+  if (profSex == 0) return PET_MALE[random(4)];
+  if (profSex == 1) return PET_FEMALE[random(4)];
+  return PET_ANY[random(4)];
+}
+void sayText(const char *s) {                 // expands {N} to a pet name
+  char *o = speechBuf; const char *p = s;
+  while (*p && o < speechBuf + sizeof(speechBuf) - 12) {
+    if (p[0] == '{' && p[1] == 'N' && p[2] == '}') { const char *n = petName(); while (*n) *o++ = *n++; p += 3; }
+    else *o++ = *p++;
   }
-  recent[recentHead++ & 7] = (c << 5) | (idx & 31);
-  sayText(L.items[idx]);
+  *o = 0;
+  speechText = speechBuf; speechStart = millis();
+}
+const Pool *pickPool(Ev e) {
+  const EvPools &P = EVENTS[e];
+  if (profAdult && profSpicy && P.spicy.n && random(100) < 45) return &P.spicy;
+  if (profAdult && P.adult.n && random(100) < 35) return &P.adult;
+  if (!profAdult && e == EV_IDLE && random(100) < 40) return &KID_IDLE;
+  return &P.base;
+}
+void say(Ev e, bool force = true) {
+  if (!force && speaking()) return;
+  const Pool *L = pickPool(e);
+  uint8_t idx = random(L->n);
+  for (int tries = 0; tries < 6; tries++) {
+    uint16_t key = (uint16_t)((uintptr_t)L->items[idx] >> 2);
+    bool used = false;
+    for (uint16_t k : recent) if (k == key) used = true;
+    if (!used) break;
+    idx = random(L->n);
+  }
+  recent[recentHead++ & 7] = (uint16_t)((uintptr_t)L->items[idx] >> 2);
+  sayText(L->items[idx]);
   nextIdleTalk = millis() + random(22000, 55000);
 }
 void drawSpeech() {
@@ -280,6 +354,7 @@ float converge = 0, convergeT = 0, rollPhase = -1;
 float blinkT = -1; int blinkWhich = 0;
 uint32_t nextBlink = 2000, nextGlance = 1500, nextTrick = 12000;
 float eyeOpen = 1.0f;     // 0 = closed line (used by onboarding to open the eyes)
+float audioPulse = 0;     // 0..1 loudness above ambient, makes the eyes bounce
 
 static void tweenShape(EyeShape &c, const EyeShape &t, float dt, float rate) {
   c.w = approach(c.w, t.w, rate, dt); c.h = approach(c.h, t.h, rate, dt); c.r = approach(c.r, t.r, rate, dt);
@@ -334,7 +409,7 @@ void drawBackground() {
 
 void drawFace(float t) {
   const float cx = W / 2, cy = H / 2 + 22, sep = 66;
-  float bob = sinf(t * 1.7f) * 3.0f, cv = converge * 0.6f;
+  float bob = sinf(t * 1.7f) * 3.0f - audioPulse * 12.0f, cv = converge * 0.6f;
   float lx = cx - sep + gazeX * GAZE_KX + cv, rx = cx + sep + gazeX * GAZE_KX - cv;
   float ly = cy + gazeY * GAZE_KY + bob, ry = ly;
   float sqL = 1 - eyeOpen, sqR = 1 - eyeOpen;
@@ -372,11 +447,12 @@ void drawFace(float t) {
 float shakeEnergy = 0, gravX = 0, gravY = 0, gravZ = 1;
 uint32_t lastMotion = 0, touchStart = 0, freefallStart = 0;
 bool wasTouch = false, asleep = false, talkative = true;
+uint32_t asleepSince = 0;
 bool tapEvent = false;            // consumed by onboarding
 uint8_t brightness = 255, brightTarget = 255;
 
 void wake(Mood m) {
-  if (asleep) { asleep = false; special = SP_NONE; setMood(m, 1500); if (talkative) say(m == ANGRY ? CAT_GRUMPY : CAT_WAKE); }
+  if (asleep) { asleep = false; special = SP_NONE; setMood(m, 1500); if (talkative) say(m == ANGRY ? EV_GRUMPY : EV_WAKE); }
   baseMood = NEUTRAL;
   lastMotion = millis();
 }
@@ -392,35 +468,35 @@ void behave(float dt) {
   if (jerk > 0.08f) { if (asleep && jerk > 0.25f) wake(SURPRISED); lastMotion = now; }
 
   if (amag < 0.35f) { if (!freefallStart) freefallStart = now; } else freefallStart = 0;
-  if (freefallStart && now - freefallStart > 60 && mood != PANIC) { setMood(PANIC, 900); wake(PANIC); if (talkative) say(CAT_DROP); }
+  if (freefallStart && now - freefallStart > 60 && mood != PANIC) { setMood(PANIC, 900); wake(PANIC); if (talkative) say(EV_DROP); }
 
   if (shakeEnergy > 3.2f && special != SP_DIZZY) {
-    setSpecial(SP_DIZZY, 2600); shakeEnergy = 0; wake(NEUTRAL); if (talkative) say(CAT_SHAKE);
+    setSpecial(SP_DIZZY, 2600); shakeEnergy = 0; wake(NEUTRAL); if (talkative) say(EV_SHAKE);
   } else if (amag > 2.3f && special == SP_NONE && mood != SURPRISED && mood != PANIC) {
-    setMood(SURPRISED, 900); blinkT = -1; if (talkative) say(CAT_BUMP);
+    setMood(SURPRISED, 900); blinkT = -1; if (talkative) say(EV_BUMP);
   }
 
   // touch
   if (touchDown && !wasTouch) touchStart = now;
   if (touchDown && now - touchStart > 700 && special != SP_LOVE) {
-    if (asleep) wake(ANGRY); else { setSpecial(SP_LOVE, 2500); blushT = 1; if (talkative) say(CAT_LOVE); }
+    if (asleep) wake(ANGRY); else { setSpecial(SP_LOVE, 2500); blushT = 1; if (talkative) say(EV_LOVE); }
   }
   if (!touchDown && wasTouch && now - touchStart < 700) {
     tapEvent = true;
     if (asleep) wake(ANGRY);
-    else { setMood(HAPPY, 1600); blushT = 1; if (talkative) say(CAT_TAP); }
+    else { setMood(HAPPY, 1600); blushT = 1; if (talkative) say(EV_TAP); }
     lastMotion = now;
   }
   wasTouch = touchDown;
 
   // upside down
-  if (gravZ < -0.75f && special == SP_NONE && !asleep) { if (baseMood != ANGRY && talkative) say(CAT_FLIP); baseMood = ANGRY; }
+  if (gravZ < -0.75f && special == SP_NONE && !asleep) { if (baseMood != ANGRY && talkative) say(EV_FLIP); baseMood = ANGRY; }
   else if (baseMood == ANGRY) baseMood = NEUTRAL;
 
   // drowsiness
   uint32_t still = now - lastMotion;
-  if (!asleep && still > 45000) { asleep = true; special = SP_ASLEEP; specialUntil = UINT32_MAX; speechText = nullptr; }
-  else if (!asleep && still > 20000 && baseMood == NEUTRAL) { baseMood = SLEEPY; if (talkative) say(CAT_SLEEPY); }
+  if (!asleep && still > 45000) { asleep = true; asleepSince = now; special = SP_ASLEEP; specialUntil = UINT32_MAX; speechText = nullptr; }
+  else if (!asleep && still > 20000 && baseMood == NEUTRAL) { baseMood = SLEEPY; if (talkative) say(EV_SLEEPY); }
   else if (still < 20000 && baseMood == SLEEPY) baseMood = NEUTRAL;
   brightTarget = asleep ? 40 : 255;
 
@@ -428,7 +504,7 @@ void behave(float dt) {
   if (now > nextBat) {
     nextBat = now + 15000;
     float v = batteryV();
-    if (v > 2.5f && v < 3.45f && baseMood == NEUTRAL) { baseMood = SAD; if (talkative) say(CAT_LOWBAT); }
+    if (v > 2.5f && v < 3.45f && baseMood == NEUTRAL) { baseMood = SAD; if (talkative) say(EV_LOWBAT); }
   }
 
   if (moodUntil && now > moodUntil) { mood = baseMood; moodUntil = 0; }
@@ -440,6 +516,34 @@ void behave(float dt) {
   blushT = approach(blushT, 0, 0.9f, dt);
   blush = approach(blush, blushT > 0.3f ? 1.0f : 0.0f, 8, dt);
 
+  // microphone reactions
+  if (micOk) {
+    float peak = micPeakDb; micPeakDb = -90;
+    static float fast = -70, ambient = -65;
+    static uint32_t loudSince = 0, quietSince = 0, talkSince = 0, lastBang = 0, lastLoud = 0, lastTalk = 0, lastQuiet = 0;
+    fast = approach(fast, micDb, 3, dt);
+    if (fast < ambient + 6) ambient = approach(ambient, fast, 0.05f, dt);
+    audioPulse = approach(audioPulse, clampf((peak - ambient - 4) / 30.0f, 0, 1), 18, dt);
+    if (peak > ambient + 24 && peak > MIC_BANG_DB && now - lastBang > 4000) {
+      lastBang = now; setMood(SURPRISED, 900); blinkT = -1;
+      if (asleep) wake(SURPRISED); else { lastMotion = now; if (talkative) say(EV_BANG); }
+    }
+    if (fast > MIC_LOUD_DB) { if (!loudSince) loudSince = now; } else loudSince = 0;
+    if (loudSince && now - loudSince > 3000 && now - lastLoud > 15000 && !asleep) {
+      bool party = now - loudSince > 9000;
+      lastLoud = now; lastMotion = now; setMood(party ? HAPPY : ANGRY, 1500);
+      if (talkative) say(party ? EV_PARTY : EV_LOUD);
+    }
+    if (fast > ambient + 8 && fast <= MIC_LOUD_DB) { if (!talkSince) talkSince = now; } else talkSince = 0;
+    if (talkSince && now - talkSince > 2000 && now - lastTalk > 30000 && !asleep) {
+      lastTalk = now; if (talkative && random(2)) say(EV_TALK, false);
+    }
+    if (fast < MIC_QUIET_DB) { if (!quietSince) quietSince = now; } else quietSince = 0;
+    if (quietSince && now - quietSince > 30000 && now - lastQuiet > 90000 && !asleep) {
+      lastQuiet = now; if (talkative) say(EV_QUIET, false);
+    }
+  }
+
   // idle life
   if (blinkT >= 0) { blinkT += dt; if (blinkT > 0.16f) blinkT = -1; }
   if (now > nextBlink && special == SP_NONE) { blinkT = 0; blinkWhich = 0; nextBlink = now + (random(10) == 0 ? 220 : random(1800, 5500)); }
@@ -450,15 +554,15 @@ void behave(float dt) {
   }
   if (talkative && now > nextTrick && special == SP_NONE && !asleep && mood == baseMood) {
     switch (random(5)) {
-      case 0: rollPhase = 0; if (random(2)) say(CAT_ROLL, false); break;
-      case 1: blinkT = 0; blinkWhich = 1; say(CAT_WINK, false); break;
-      case 2: convergeT = 38; say(CAT_CROSS, false); break;
-      case 3: setMood(SUSPICIOUS, 2200); glanceX = 70; say(CAT_SUS, false); break;
+      case 0: rollPhase = 0; if (random(2)) say(EV_ROLL, false); break;
+      case 1: blinkT = 0; blinkWhich = 1; say(EV_WINK, false); break;
+      case 2: convergeT = 38; say(EV_CROSS, false); break;
+      case 3: setMood(SUSPICIOUS, 2200); glanceX = 70; say(EV_SUS, false); break;
       case 4: setMood(HAPPY, 1200); break;
     }
     nextTrick = now + random(9000, 22000);
   }
-  if (talkative && now > nextIdleTalk && !asleep && special == SP_NONE) say(CAT_IDLE, false);
+  if (talkative && now > nextIdleTalk && !asleep && special == SP_NONE) say(EV_IDLE, false);
 
   if (convergeT > 0) { converge = approach(converge, convergeT, 6, dt); if (converge > convergeT - 1) convergeT = -1; }
   else converge = approach(converge, 0, 3, dt);
@@ -490,10 +594,20 @@ int modeHover = 0;               // 0 light, 1 dark
 char serialTag[12];
 
 void obGo(OnbStep s) { ob = s; obT0 = millis(); }
+void stepHeader(const char *num, const char *title);
 uint32_t obT() { return millis() - obT0; }
 
 // tiny label: pitch 2 → effectively a 2x pixel font
-void label(const char *s, int x, int y, uint16_t col, int align = 0) { dotText(s, 99, x, y, 2, 1.0f, col, align, 0, W); }
+void label(const char *s, int x, int y, uint16_t col, int align = 0, int maxW = W) { dotText(s, 99, x, y, 2, 1.0f, col, align, 0, maxW); }
+void brackets(int x, int y, int w, int h, float t) {   // orange corner brackets, breathing
+  int p = 3 + (int)(2 * sinf(t * 6)), L = 16; uint16_t o = C_ORANGE;
+  g->fillRect(x - p, y - p, L, 3, o); g->fillRect(x - p, y - p, 3, L, o);
+  g->fillRect(x + w + p - L, y - p, L, 3, o); g->fillRect(x + w + p - 3, y - p, 3, L, o);
+  g->fillRect(x - p, y + h + p - 3, L, 3, o); g->fillRect(x - p, y + h + p - L, 3, L, o);
+  g->fillRect(x + w + p - L, y + h + p - 3, L, 3, o); g->fillRect(x + w + p - 3, y + h + p - L, 3, L, o);
+}
+int totalSteps() { return profAdult ? 6 : 5; }
+void stepHeaderN(int n, const char *title) { char b[4]; snprintf(b, sizeof(b), "%02d", n); stepHeader(b, title); }
 
 void stepHeader(const char *num, const char *title) {
   g->fillRect(16, 18, 8, 8, C_ORANGE);
@@ -586,15 +700,7 @@ void drawTile(int i, float zoom, bool hover, float t) {
     label(dark ? "B" : "A", x + w - 22, y + 12, ink);
     if (dark) label("SAVES BATTERY", x + 12, y + h - 22, ink);
     else label("BRIGHT + GRAINY", x + 12, y + h - 22, ink);
-    if (hover) {    // orange corner brackets, breathing
-      int p = 3 + (int)(2 * sinf(t * 6));
-      uint16_t o = C_ORANGE;
-      int L = 16;
-      g->fillRect(x - p, y - p, L, 3, o); g->fillRect(x - p, y - p, 3, L, o);
-      g->fillRect(x + w + p - L, y - p, L, 3, o); g->fillRect(x + w + p - 3, y - p, 3, L, o);
-      g->fillRect(x - p, y + h + p - 3, L, 3, o); g->fillRect(x - p, y + h + p - L, 3, L, o);
-      g->fillRect(x + w + p - L, y + h + p - 3, L, 3, o); g->fillRect(x + w + p - 3, y + h + p - L, 3, L, o);
-    }
+    if (hover) brackets(x, y, w, h, t);
   }
 }
 
@@ -608,7 +714,7 @@ void obMode() {
   drawTile(0, 0, modeHover == 0, t / 1000.0f);
   drawTile(1, 0, modeHover == 1, t / 1000.0f);
   label("TAP TO PICK", W / 2, H - 52, C_TEAL, 1);
-  progressDots(1, 3);
+  progressDots(1, totalSteps());
   if (tapEvent) { tapEvent = false; modeHover = touchY > H / 2 ? 1 : 0; obGo(OB_MODE_ZOOM); }
 }
 void obModeZoom() {
@@ -620,22 +726,74 @@ void obModeZoom() {
   if (t > 500) {
     applyTheme(modeHover == 1);
     prefs.putBool("dark", darkMode);
-    obGo(OB_TILT);
-    sayText(darkMode ? "LIGHTS OFF." : "LIGHTS ON.");
+    obGo(OB_SEX); tapEvent = false;
   }
+}
+
+// Generic stacked-tile question. Returns the picked index once, else -1.
+int choiceHover = 0, choicePicked = -1; uint32_t choiceFlash = 0;
+int obChoose(int stepN, const char *title, const Choice *c, int n) {
+  uint32_t t = obT();
+  drawBackground();
+  stepHeaderN(stepN, title);
+  const int top = 52, bottom = H - 70, gap = 12, th = (bottom - top - gap * (n - 1)) / n;
+  auto idxAt = [&](int y) { return constrain((y - top) / (th + gap), 0, n - 1); };
+  if (choicePicked < 0) {
+    if (touchDown) choiceHover = idxAt(touchY);
+    else if (fabsf(gravY) > 0.3f) choiceHover = GAZE_SIGN_Y * gravY > 0 ? n - 1 : 0;
+    if (tapEvent && t > 400) { choicePicked = idxAt(touchY); choiceFlash = millis(); }
+  }
+  tapEvent = false;
+  for (int i = 0; i < n; i++) {
+    int x = 20, y = top + i * (th + gap), w = W - 40;
+    bool flash = choicePicked == i && ((millis() - choiceFlash) / 80) % 2 == 0;
+    bool hov = (choicePicked < 0 ? choiceHover : choicePicked) == i;
+    if (flash) g->fillRect(x, y, w, th, C_ORANGE);
+    g->drawRect(x, y, w, th, C_INK); g->drawRect(x + 1, y + 1, w - 2, th - 2, C_INK);
+    char key[2] = { (char)('A' + i), 0 };
+    label(key, x + w - 22, y + 10, C_INK);
+    dotText(c[i].big, 99, x + 14, y + 14, 4, 1.7f, C_INK, 0, 0, w - 40);
+    if (c[i].small) label(c[i].small, x + 14, y + th - (strlen(c[i].small) > 18 ? 42 : 22), C_INK, 0, w - 28);
+    if (hov && !flash) brackets(x, y, w, th, t / 1000.0f);
+  }
+  label("TAP TO PICK", W / 2, H - 52, C_INK, 1);
+  progressDots(stepN, totalSteps());
+  if (choicePicked >= 0 && millis() - choiceFlash > 480) { int r = choicePicked; choicePicked = -1; choiceHover = 0; return r; }
+  return -1;
+}
+
+const Choice CH_SEX[]   = { {"HE", "HIM / MALE"}, {"SHE", "HER / FEMALE"}, {"SKIP", "RATHER NOT SAY"} };
+const Choice CH_AGE[]   = { {"UNDER 18", "KID MODE"}, {"18+", "GROWN-UP MODE"} };
+const Choice CH_SPICY[] = { {"KEEP IT CUTE", "FLIRTY, NEVER RUDE"}, {"UNLOCK SPICY", "CHEEKY LINES. MAY SAY THINGS IN PUBLIC."} };
+
+void obSex() {
+  int r = obChoose(2, "WHO ARE YOU?", CH_SEX, 3);
+  if (r >= 0) { profSex = r; obGo(OB_AGE); }
+}
+void obAge() {
+  int r = obChoose(3, "HOW OLD?", CH_AGE, 2);
+  if (r >= 0) {
+    profAdult = (r == 1); profSpicy = false;
+    if (profAdult) obGo(OB_SPICY);
+    else { obGo(OB_TILT); sayText("COOL! LET'S PLAY."); }
+  }
+}
+void obSpicy() {
+  int r = obChoose(4, "SPICY MODE?", CH_SPICY, 2);
+  if (r >= 0) { profSpicy = (r == 1); obGo(OB_TILT); sayText(profSpicy ? "OH MY. ;)" : "CUTE IT IS."); }
 }
 
 void obTilt() {
   static uint32_t tiltHeld = 0;
   uint32_t t = obT();
   drawBackground();
-  stepHeader("02", "TILT ME");
+  stepHeaderN(profAdult ? 5 : 4, "TILT ME");
   if (t > 2000 && t < 2050) sayText("TILT ME.");
   bool tilted = sqrtf(gravX * gravX + gravY * gravY) > 0.35f;
   if (tilted) { if (!tiltHeld) tiltHeld = millis(); } else tiltHeld = 0;
   drawFace(t / 1000.0f);
   drawSpeech();
-  progressDots(2, 3);
+  progressDots(profAdult ? 5 : 4, totalSteps());
   if ((tiltHeld && millis() - tiltHeld > 600) || t > 12000) {
     tiltHeld = 0; sayText("WHEEE.");
     setMood(HAPPY, 1200); obGo(OB_TAP); tapEvent = false;
@@ -644,12 +802,12 @@ void obTilt() {
 void obTap() {
   uint32_t t = obT();
   drawBackground();
-  stepHeader("03", "TAP ME");
+  stepHeaderN(profAdult ? 6 : 5, "TAP ME");
   if (t > 1600 && t < 1650) sayText("NOW TAP ME.");
   drawFace(t / 1000.0f);
   drawSpeech();
-  progressDots(3, 3);
-  if (tapEvent || t > 15000) { tapEvent = false; setMood(HAPPY, 2000); blushT = 1; sayText("HEHE. NICE TO MEET YOU."); obGo(OB_DONE); }
+  progressDots(totalSteps(), totalSteps());
+  if (tapEvent || t > 15000) { tapEvent = false; setMood(HAPPY, 2000); blushT = 1; sayText(!profAdult ? "LET'S BE FRIENDS, {N}!" : profSpicy ? "WELL HELLO, {N}. ;)" : "NICE TO MEET YOU, {N}."); obGo(OB_DONE); }
 }
 void obDone() {
   uint32_t t = obT();
@@ -663,6 +821,7 @@ void obDone() {
   }
   if (t > 3200) {
     prefs.putBool("onb", true);
+    prefs.putUChar("sex", profSex); prefs.putBool("adult", profAdult); prefs.putBool("spicy", profAdult && profSpicy);
     talkative = true; lastMotion = millis(); nextIdleTalk = millis() + 20000;
     obGo(OB_FINISHED);
   }
@@ -700,6 +859,7 @@ void setup() {
   imuInit();
   i2cWrite(ADDR_TOUCH, 0x00, 0x00);
   analogReadResolution(12);
+  micInit();
 
   if (!g->begin()) Serial.println("Canvas alloc failed (PSRAM?)");
   panel->setBrightness(255);
@@ -715,12 +875,15 @@ void setup() {
   prefs.begin("doobie", false);
   bool onboarded = prefs.getBool("onb", false);
   applyTheme(prefs.getBool("dark", false));
+  profSex = prefs.getUChar("sex", 2); profAdult = prefs.getBool("adult", false);
+  profSpicy = profAdult && prefs.getBool("spicy", false);
+  Serial.printf("Profile: sex=%d adult=%d spicy=%d\n", profSex, profAdult, profSpicy);
   curL = curR = moodShape(NEUTRAL, true);
   randomSeed(esp_random());
   lastMotion = millis();
 
   if (!onboarded) startOnboarding();
-  else { say(CAT_GREET); }
+  else { say(EV_GREET); }
 }
 
 void loop() {
@@ -732,11 +895,24 @@ void loop() {
   pollButton();
   behave(dt);
 
+  // Power saving for the 150 mAh cell: ~12 fps while asleep, panel fully off
+  // after 5 min asleep (IMU still polled, so any motion wakes it).
+  static bool panelOff = false;
+  if (asleep && ob == OB_FINISHED && now - asleepSince > 300000) {
+    if (!panelOff) { panel->displayOff(); panelOff = true; Serial.println("panel off"); }
+    delay(150);
+    return;
+  }
+  if (panelOff) { panel->displayOn(); panelOff = false; panel->setBrightness(brightness); }
+
   switch (ob) {
     case OB_BOOT:      obBoot(); break;
     case OB_HELLO:     obHello(); break;
     case OB_MODE:      obMode(); break;
     case OB_MODE_ZOOM: obModeZoom(); break;
+    case OB_SEX:       obSex(); break;
+    case OB_AGE:       obAge(); break;
+    case OB_SPICY:     obSpicy(); break;
     case OB_TILT:      obTilt(); break;
     case OB_TAP:       obTap(); break;
     case OB_DONE:      obDone(); break;
@@ -747,11 +923,12 @@ void loop() {
       drawSpeech();
   }
   g->flush();
+  if (asleep) delay(60);
 
   if (now - lastLog > 500) {
     lastLog = now;
-    Serial.printf("ob=%d dark=%d a=%.2f,%.2f,%.2f touch=%d(%d,%d) bat=%.2fV mood=%d sp=%d say=\"%s\" fps=%.0f\n",
-                  ob, darkMode, ax, ay, az, touchDown, touchX, touchY, batteryV(), mood, special,
+    Serial.printf("mic=%s%.0fdB ob=%d dark=%d a=%.2f,%.2f,%.2f touch=%d(%d,%d) bat=%.2fV mood=%d sp=%d say=\"%s\" fps=%.0f\n",
+                  micOk ? "" : "off/", (float)micDb, ob, darkMode, ax, ay, az, touchDown, touchX, touchY, batteryV(), mood, special,
                   speaking() ? speechText : "", 1.0f / dt);
   }
 }
