@@ -60,6 +60,23 @@ arduino-cli upload  -b "$FQBN" -p /dev/cu.usbmodem* firmware/doobie
 
 The age gate is self-declared. Under-18 profiles never draw from the adult or spicy pools (`pickPool()`). Spicy lines are innuendo, not explicit, and the opt-in screen warns that it may say them in public. Hold BOOT for 2 s to redo onboarding and change the profile.
 
+### Charge LEDs
+
+The board shows charge state in hardware, and the lights glow through a translucent case:
+
+| Red (PWR) | Green (CHG) | Meaning |
+|---|---|---|
+| On | On | Charging |
+| On | Off | Fully charged (or no battery connected) |
+| Off | Off | Running on battery |
+
+The red LED runs from USB 5 V. The green LED is driven by the ETA6098's STAT pin, which isn't wired to the ESP32. To show **FULL** on screen and get an "ALL CHARGED UP!" reaction, fit this mod and set `CHG_SENSE_PIN 7` in `doobie.ino`:
+
+- STAT (the CHG LED cathode) to a 100 kΩ resistor to GPIO7
+- GPIO7 to a 100 kΩ resistor to GND
+
+**Charge current warning (V1 boards):** R11 = 82 kΩ sets the charger to 2 A, far too much for a 150 mAh cell. Replace it with about 1.2 MΩ (~0.14 A). V1.1 boards ship with 360 kΩ (0.5 A).
+
 ### Optional microphone
 
 The board has no mic. Wire an Adafruit PDM MEMS mic breakout (#3492, MP34DT01-M):

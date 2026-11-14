@@ -172,6 +172,20 @@ void touchRead() {
 // wired to a GPIO, so "on USB" is the best the firmware can know.
 float batteryV() { return analogReadMilliVolts(PIN_BAT_ADC) * 3.0f / 1000.0f; }
 float batV = 4.0f; bool onUsb = false;
+
+// Optional charge-status mod: the ETA6098 STAT pin (= cathode of the green CHG
+// LED) isn't wired to the ESP32. Solder STAT -> 100k -> GPIO7 and GPIO7 -> 100k
+// -> GND, then set CHG_SENSE_PIN to 7. STAT pulls low while charging (~0 V) and
+// floats up to VBAT through the LED when done, so the divider reads ~1.5-2.1 V.
+#define CHG_SENSE_PIN  -1          // -1 = mod not fitted
+bool chargeFull = false;
+bool readChargeFull() {
+#if CHG_SENSE_PIN >= 0
+  return analogReadMilliVolts(CHG_SENSE_PIN) > 900;
+#else
+  return false;
+#endif
+}
 int batteryPct() { return (int)clampf((batV - 3.30f) / (4.15f - 3.30f) * 100.0f, 0, 100); }
 
 // --- PDM microphone (optional add-on). Level in dBFS, computed on core 0.
@@ -551,6 +565,9 @@ void behave(float dt) {
       if (talkative) say(usb ? EV_CHARGE : EV_UNPLUG);
       if (usb && baseMood == SAD) baseMood = NEUTRAL;
     }
+    bool full = usb && readChargeFull();
+    if (!firstBat && full && !chargeFull && talkative) { setMood(HAPPY, 1500); sayText("ALL CHARGED UP!"); }
+    chargeFull = full;
     onUsb = usb; firstBat = false;
     static uint32_t lastLowTalk = 0;
     if (!usb && batV > 2.5f && batV < 3.45f && baseMood == NEUTRAL) {
@@ -1016,7 +1033,7 @@ void loop() {
       drawSpeech();
       {   // tiny status: USB while plugged, battery % otherwise
         char st[8];
-        if (onUsb) snprintf(st, sizeof(st), "USB"); else snprintf(st, sizeof(st), "%d%%", batteryPct());
+        if (onUsb) snprintf(st, sizeof(st), chargeFull ? "FULL" : "USB"); else snprintf(st, sizeof(st), "%d%%", batteryPct());
         label(st, W - 16 - strlen(st) * 12, H - 28, onUsb ? C_ORANGE : C_INK);
       }
   }
