@@ -89,8 +89,9 @@ The board has no mic. Wire an Adafruit PDM MEMS mic breakout (#3492, MP34DT01-M)
 | DAT | GPIO6 |
 
 The firmware detects it at boot; the serial log shows `Mic: detected`. The level thresholds (`MIC_*_DB`) are first guesses based on the mic's datasheet sensitivity, so tune them against the `mic=…dB` value in the serial log.
-- **Settings:** triple-tap the screen anywhere for a tile menu with light/dark mode, spicy on/off (adults), redo onboarding, and exit. It closes on its own after 10 s idle.
-- **BOOT button:** a short press toggles light and dark. Hold it for 2 s to run onboarding again.
+- **Settings:** triple-tap the screen anywhere for a tile menu with light/dark mode, spicy on/off (adults), redo onboarding, power off, and exit. It closes on its own after 10 s idle.
+- **On/off:** hold BOOT for 2 s, or pick *Power off* in settings. It says goodnight, its eyes close, the picture collapses like an old TV, and it goes into deep sleep. Press BOOT (or RST) to turn it back on. It also switches itself off below 3.3 V on battery to protect the cell. While it's off, the battery still charges over USB.
+- **BOOT button:** a short press toggles light and dark.
 - **Board revision:** V1 and V1.1 are detected at boot (V1.1 has a pull-up on GPIO18) and the LCD CS pin is set to match. The boot log also prints an I2C scan.
 
 ## Case

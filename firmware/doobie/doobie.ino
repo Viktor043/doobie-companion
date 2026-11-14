@@ -15,8 +15,8 @@
 //  Optional mic: Adafruit PDM MEMS mic (#3492) on GPIO5 = CLK, GPIO6 = DAT,
 //  auto-detected at boot. Without it the noise reactions are simply off.
 //    Triple-tap screen: settings (mode, spicy, redo onboarding)
-//    BOOT short press : toggle light / dark
-//    BOOT hold 2 s    : run onboarding again
+//    BOOT short press : toggle light / dark (wakes it when off)
+//    BOOT hold 2 s    : power off (deep sleep); press BOOT or RST to turn on
 // ============================================================================
 #include <Arduino_GFX_Library.h>
 #include <font/glcdfont.h>   // classic 5x7 ASCII table, reused as a dot-matrix font
@@ -24,8 +24,13 @@
 #include <Preferences.h>
 #include <ESP_I2S.h>
 #include <driver/gpio.h>
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
 #include "eyetypes.h"
 #include "phrases.h"
+
+void powerOff(const char *msg);
+extern OnbStep ob;
 
 // ---------- pins (Waveshare 1.64; V1.1 moved LCD CS to GPIO46, see detectBoard) ----------
 #define PIN_LCD_RST   21
@@ -569,6 +574,7 @@ void behave(float dt) {
     if (!firstBat && full && !chargeFull && talkative) { setMood(HAPPY, 1500); sayText("ALL CHARGED UP!"); }
     chargeFull = full;
     onUsb = usb; firstBat = false;
+    if (!usb && batV > 2.5f && batV < 3.30f && ob == OB_FINISHED) powerOff("TOO TIRED. BYE...");   // protect the cell
     static uint32_t lastLowTalk = 0;
     if (!usb && batV > 2.5f && batV < 3.45f && baseMood == NEUTRAL) {
       baseMood = SAD;
@@ -665,6 +671,7 @@ char serialTag[12];
 void obGo(OnbStep s) { ob = s; obT0 = millis(); tripleTap = false; }
 void stepHeader(const char *num, const char *title);
 void startOnboarding();
+void powerOff(const char *msg);
 uint32_t obT() { return millis() - obT0; }
 
 // tiny label: pitch 2 → effectively a 2x pixel font
@@ -860,10 +867,11 @@ void obSettings() {
   static char modeTxt[16], spicyTxt[16];
   snprintf(modeTxt, sizeof(modeTxt), "MODE: %s", darkMode ? "DARK" : "LIGHT");
   snprintf(spicyTxt, sizeof(spicyTxt), "SPICY: %s", profSpicy ? "ON" : "OFF");
-  Choice items[4]; int n = 0, ids[4];
+  Choice items[5]; int n = 0, ids[5];
   items[n] = { modeTxt, "LIGHT = TEAL, DARK = SAVES BATTERY" }; ids[n++] = 0;
   if (profAdult) { items[n] = { spicyTxt, "CHEEKY LINES ON / OFF" }; ids[n++] = 1; }
   items[n] = { "PROFILE", "REDO ONBOARDING" }; ids[n++] = 2;
+  items[n] = { "POWER OFF", "PRESS BOOT TO WAKE" }; ids[n++] = 4;
   items[n] = { "EXIT", nullptr }; ids[n++] = 3;
   if (touchDown) settingsTouched = millis();
   int r = obChoose(0, "SETTINGS", items, n);
@@ -874,6 +882,7 @@ void obSettings() {
       case 1: profSpicy = !profSpicy; prefs.putBool("spicy", profSpicy); break;
       case 2: startOnboarding(); return;
       case 3: obGo(OB_FINISHED); sayText("BYE, SETTINGS."); lastMotion = millis(); return;
+      case 4: obGo(OB_FINISHED); powerOff("GOODNIGHT."); return;
     }
   }
   if (millis() - settingsTouched > 10000) { obGo(OB_FINISHED); lastMotion = millis(); }
@@ -936,7 +945,7 @@ void pollButton() {
   static uint32_t downAt = 0; static bool longFired = false;
   bool down = digitalRead(PIN_BOOT) == LOW;
   if (down && !downAt) { downAt = millis(); longFired = false; }
-  if (down && downAt && !longFired && millis() - downAt > 2000) { longFired = true; startOnboarding(); }
+  if (down && downAt && !longFired && millis() - downAt > 2000) { longFired = true; powerOff("GOODNIGHT."); }
   if (!down && downAt) {
     if (!longFired && millis() - downAt > 30 && ob == OB_FINISHED) {
       applyTheme(!darkMode); prefs.putBool("dark", darkMode);
@@ -945,6 +954,46 @@ void pollButton() {
     }
     downAt = 0;
   }
+}
+
+// ============================================================================
+//  Power off = deep sleep (the board has no power switch).
+//  Draw goes to roughly the regulator + charger quiescent current; the cell
+//  still charges over USB while "off". Wake: BOOT (GPIO0, RTC-capable) or RST.
+// ============================================================================
+void powerOff(const char *msg) {
+  Serial.println("power off");
+  special = SP_NONE; asleep = false; blinkT = -1; mood = baseMood = SLEEPY; moodUntil = 0;
+  panel->setBrightness(255);
+  sayText(msg);
+  uint32_t t0 = millis(), last = t0;
+  while (millis() - t0 < 2200) {               // eyes droop shut while it says goodbye
+    uint32_t now = millis(); float dt = (now - last) / 1000.0f; last = now;
+    eyeOpen = 1.0f - clampf((now - t0 - 700) / 900.0f, 0, 1);
+    tweenShape(curL, moodShape(SLEEPY, true), dt, 6); tweenShape(curR, moodShape(SLEEPY, false), dt, 6);
+    drawBackground(); drawFace(now / 1000.0f); drawSpeech(); g->flush();
+  }
+  for (int i = 0; i <= 14; i++) {              // old-TV collapse to a dot
+    drawBackground();
+    float k = i / 14.0f;
+    int w = (int)(W * 0.7f * (1 - k)) + 6, h = (int)(10 * (1 - k)) + 4;
+    g->fillRoundRect(W / 2 - w / 2, H / 2 - h / 2, w, h, h / 2, C_INK);
+    g->flush(); delay(16);
+  }
+  for (int b = 255; b > 0; b -= 32) { panel->setBrightness(b); delay(12); }
+  panel->setBrightness(0);
+  panel->displayOff();                         // DISPOFF + SLPIN
+  i2cWrite(ADDR_TOUCH, 0x86, 0x01);            // touch: auto-drop to monitor mode
+  if (imuOk) i2cWrite(ADDR_IMU, 0x08, 0x00);   // IMU: accel + gyro off
+  if (micOk && micI2S) micI2S->end();
+  prefs.end();
+  while (digitalRead(PIN_BOOT) == LOW) delay(10);   // don't wake on the same press
+  delay(80);
+  rtc_gpio_pullup_en(GPIO_NUM_0);
+  rtc_gpio_pulldown_dis(GPIO_NUM_0);
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
+  Serial.flush();
+  esp_deep_sleep_start();
 }
 
 // ============================================================================
@@ -990,6 +1039,7 @@ void setup() {
   lastMotion = millis();
 
   if (!onboarded) startOnboarding();
+  else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) { rtc_gpio_deinit(GPIO_NUM_0); pinMode(PIN_BOOT, INPUT_PULLUP); sayText("I'M BACK!"); }
   else { say(EV_GREET); }
 }
 
