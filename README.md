@@ -45,8 +45,8 @@ arduino-cli upload  -b "$FQBN" -p /dev/cu.usbmodem* firmware/doobie
 | Hold | Hearts |
 | Leave it still for 20 s / 45 s | Sleepy / asleep (dims) |
 
-- **Profile questions** during onboarding: *he / she / skip*, then *under 18 / 18+*. Adults also get a separate opt-in for spicy lines.
-- **Speech:** about 230 short lines (`phrases.h`), typed out in a 5x7 dot font and dissolved away. Lines come in tiers (base, kid, adult, spicy), and `{N}` is swapped for a pet name that suits the profile. It avoids repeating recent lines and makes the odd unprompted remark.
+- **Profile questions** during onboarding: *he / she / skip*, then *under 18 / 18+*. Adults then pick a vibe: *Regular* (pet attitude), *Flirty* or *Spicy*.
+- **Speech:** about 400 short lines (`phrases.h`), typed out in a 5x7 dot font and dissolved away. Lines come in tiers (base, kid, pet, adult, spicy), and `{N}` is swapped for a pet name that suits the profile. It avoids repeating recent lines and makes the odd unprompted remark.
 - **Mic reactions (optional add-on):** claps, bangs, sustained noise, music or a party, chatter and long silences each get their own lines, and the eyes bounce with loudness.
 - **Power saving** for the 150 mAh cell: about 12 fps while asleep, the panel switches off after 5 minutes asleep, and motion wakes it.
 
@@ -54,11 +54,16 @@ arduino-cli upload  -b "$FQBN" -p /dev/cu.usbmodem* firmware/doobie
 
 | Journey | Profile | Pet names | Lines it can say | Onboarding ends with |
 |---|---|---|---|---|
-| Kid | Under 18, any gender | BUDDY, CHAMP, FRIEND, PAL | Base, plus encouraging kid lines ("HIGH FIVE!", "HOMEWORK DONE?") | "LET'S BE FRIENDS, BUDDY!" |
-| Grown-up, cute | 18+, spicy off | He: HANDSOME, TIGER… / She: GORGEOUS, QUEEN… / Skip: CUTIE, STAR… | Base, plus flirty adult lines ("OH, NICE FINGER.", "I LIKE THAT.") | "NICE TO MEET YOU, {N}." |
-| Grown-up, spicy | 18+, spicy opted in | Same as above | Base, adult, plus cheeky innuendo ("BUY ME DINNER FIRST.", "UPSIDE DOWN? KINKY.") | "WELL HELLO, {N}. ;)" |
+| Kid | Under 18 | BUDDY, CHAMP, FRIEND, PAL | Base, kid ("HIGH FIVE!", "HOMEWORK DONE?") and a little pet attitude | "LET'S BE FRIENDS, BUDDY!" |
+| Regular | 18+, vibe: Regular | HUMAN, BUDDY, PAL | Base and pet attitude: cat/dog energy, no flirting ("FEED ME?", "I'M THE BOSS.", "*PURR*") | "YOU MAY PET ME NOW." |
+| Flirty | 18+, vibe: Flirty | He: HANDSOME, TIGER… / She: GORGEOUS, QUEEN… / Skip: CUTIE, STAR… | Base, plus flirty adult lines ("OH, NICE FINGER.", "I LIKE THAT.") | "NICE TO MEET YOU, {N}." |
+| Spicy | 18+, vibe: Spicy | Same as Flirty | Base, adult, plus cheeky innuendo ("BUY ME DINNER FIRST.", "UPSIDE DOWN? KINKY.") | "WELL HELLO, {N}. ;)" |
 
-The age gate is self-declared. Under-18 profiles never draw from the adult or spicy pools (`pickPool()`). Spicy lines are innuendo, not explicit, and the opt-in screen warns that it may say them in public. Hold BOOT for 2 s to redo onboarding and change the profile.
+There are about 400 lines across the pools. Change the vibe at any time in settings (triple-tap).
+
+The age gate is self-declared. Under-18 profiles never draw from the adult or spicy pools (`pickPool()`). Spicy lines are innuendo, not explicit.
+
+**Pacing:** idle remarks come every 28-69 s. Taps get a spoken reply about two times in three. Low-stakes reactions wait 2.5 s after the previous message, and the eyes stay below the text while Doobie is talking.
 
 ### Charge LEDs
 

@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 0.3
+//  DOOBIE COMPANION, firmware 0.4
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -28,6 +28,8 @@
 #include <driver/rtc_io.h>
 #include "eyetypes.h"
 #include "phrases.h"
+
+#define FW_VERSION "0.4"
 
 void powerOff(const char *msg);
 extern OnbStep ob;
@@ -314,10 +316,25 @@ int dotText(const char *s, int visible, int x, int y, int pitch, float r, uint16
   return line * (10 * pitch);
 }
 
+// Line count dotText() would use for s at this pitch/width (same wrap rules).
+int textLines(const char *s, int pitch, int maxWidth) {
+  const int maxChars = max(1, maxWidth / (6 * pitch));
+  int len = strlen(s), i = 0, lines = 0;
+  while (i < len) {
+    int end = min(len, i + maxChars);
+    if (end < len) { int sp = end; while (sp > i && s[sp] != ' ') sp--; if (sp > i) end = sp; }
+    i = end; while (i < len && s[i] == ' ') i++;
+    lines++;
+  }
+  return lines;
+}
+int textHeight(int lines, int pitch) { return lines ? lines * 10 * pitch - 3 * pitch : 0; }
+
 // ============================================================================
 //  Speech
 // ============================================================================
 const char *speechText = nullptr;
+uint32_t speechEndsAt = 0;
 uint32_t speechStart = 0, nextIdleTalk = 25000;
 uint16_t recent[8]; uint8_t recentHead = 0;  // recently used lines (pointer hash) to avoid repeats
 
@@ -327,11 +344,14 @@ bool speaking() { return speechText && millis() - speechStart < speechDuration(s
 // ---------- user profile (set during onboarding) ----------
 uint8_t profSex = 2;            // 0 he, 1 she, 2 skip
 bool profAdult = false;         // under-18 profiles never see ADULT/SPICY lines
-bool profSpicy = false;         // adults opt in separately
+uint8_t profTone = 0;          // adults: 0 regular (pet attitude), 1 flirty, 2 spicy
+#define profSpicy (profAdult && profTone == 2)
+const char *const TONE_NAME[3] = { "REGULAR", "FLIRTY", "SPICY" };
 char speechBuf[72];
 
 const char *petName() {
   if (!profAdult)   return PET_KID[random(4)];
+  if (profTone == 0) return PET_REG[random(4)];
   if (profSex == 0) return PET_MALE[random(4)];
   if (profSex == 1) return PET_FEMALE[random(4)];
   return PET_ANY[random(4)];
@@ -343,17 +363,31 @@ void sayText(const char *s) {                 // expands {N} to a pet name
     else *o++ = *p++;
   }
   *o = 0;
-  speechText = speechBuf; speechStart = millis();
+  speechText = speechBuf; speechStart = millis(); speechEndsAt = speechStart + speechDuration(speechBuf);
 }
+// Kids: base + kid + some pet. Regular: base + pet. Flirty: + adult. Spicy: + spicy.
 const Pool *pickPool(Ev e) {
   const EvPools &P = EVENTS[e];
-  if (profAdult && profSpicy && P.spicy.n && random(100) < 45) return &P.spicy;
-  if (profAdult && P.adult.n && random(100) < 35) return &P.adult;
-  if (!profAdult && e == EV_IDLE && random(100) < 40) return &KID_IDLE;
+  int roll = random(100);
+  if (!profAdult) {
+    if (e == EV_IDLE && roll < 35) return &KID_IDLE;
+    if (P.pet.n && roll >= 70) return &P.pet;
+    return &P.base;
+  }
+  if (profTone == 2 && P.spicy.n && roll < 40) return &P.spicy;
+  if (profTone >= 1 && P.adult.n && roll >= 40 && roll < 70) return &P.adult;
+  if (P.pet.n && roll >= (profTone == 0 ? 50 : 85)) return &P.pet;
   return &P.base;
 }
+// Frequent, low-stakes reactions don't always talk, and wait for a short pause
+// after the previous message ("breathing room"). Big events always speak.
+bool chattyEvent(Ev e) { return e == EV_TAP || e == EV_LOVE || e == EV_TALK || e == EV_IDLE || e == EV_SUS || e == EV_ROLL || e == EV_CROSS || e == EV_WINK; }
 void say(Ev e, bool force = true) {
   if (!force && speaking()) return;
+  if (chattyEvent(e)) {
+    if (speaking() || millis() < speechEndsAt + 2500) return;
+    if (e == EV_TAP && random(100) >= 65) return;
+  }
   const Pool *L = pickPool(e);
   uint8_t idx = random(L->n);
   for (int tries = 0; tries < 6; tries++) {
@@ -365,7 +399,7 @@ void say(Ev e, bool force = true) {
   }
   recent[recentHead++ & 7] = (uint16_t)((uintptr_t)L->items[idx] >> 2);
   sayText(L->items[idx]);
-  nextIdleTalk = millis() + random(22000, 55000);
+  nextIdleTalk = millis() + random(28000, 69000);   // +25% vs 0.3
 }
 void drawSpeech() {
   if (!speechText) return;
@@ -374,11 +408,12 @@ void drawSpeech() {
   int len = strlen(speechText);
   int visible = min(len, (int)(t / 38) + 1);
   float dissolve = t > total - 380 ? (t - (total - 380)) / 380.0f : 0;
-  dotText(speechText, visible, W / 2, 46, 4, 1.7f, C_INK, 1, dissolve);
-  if (visible < len && (t / 120) % 2) {   // block cursor while typing
-    // cursor drawn as a small accent square at the bottom-right of the text region
-    g->fillRect(W / 2 + 6, 46 + 7 * 4 + 6, 6, 3, C_ORANGE);
-  }
+  int pitch = textLines(speechText, 4, W - 40) <= 2 ? 4 : 3;
+  float rr = pitch == 4 ? 1.7f : 1.3f;
+  int lines = textLines(speechText, pitch, W - 40);
+  dotText(speechText, visible, W / 2, 40, pitch, rr, C_INK, 1, dissolve, W - 40);
+  if (visible < len && (t / 120) % 2)   // typing cursor under the block
+    g->fillRect(W / 2 - 4, 40 + textHeight(lines, pitch) + 6, 8, 3, C_ORANGE);
 }
 
 // ============================================================================
@@ -465,7 +500,9 @@ void drawFace(float t) {
   const float cx = W / 2, cy = H / 2 + 22, sep = 66;
   float bob = sinf(t * 1.7f) * 3.0f - audioPulse * 12.0f, cv = converge * 0.6f;
   float lx = cx - sep + gazeX * GAZE_KX + cv, rx = cx + sep + gazeX * GAZE_KX - cv;
-  float ly = cy + gazeY * GAZE_KY + bob, ry = ly;
+  float gy = gazeY * GAZE_KY;
+  if (speechText) gy = fmaxf(gy, -24.0f);       // breathing room under the speech
+  float ly = cy + gy + bob, ry = ly;
   float sqL = 1 - eyeOpen, sqR = 1 - eyeOpen;
   if (blinkT >= 0) {
     float p = blinkT / 0.16f, s = p < 1 ? sinf(p * PI) : 0;
@@ -688,8 +725,9 @@ void stepHeaderN(int n, const char *title) { char b[4]; snprintf(b, sizeof(b), "
 
 void stepHeader(const char *num, const char *title) {
   g->fillRect(16, 18, 8, 8, C_ORANGE);
-  label(num, 30, 18, C_INK);
-  label(title, 30 + strlen(num) * 12 + 10, 18, C_INK);
+  int x = 30;
+  if (num && *num) { label(num, x, 18, C_INK); x += strlen(num) * 12 + 10; }
+  label(title, x, 18, C_INK);
 }
 void progressDots(int n, int of) {
   int total = of * 14 - 6, x0 = (W - total) / 2;
@@ -715,14 +753,14 @@ void obBoot() {
     }
   if (t > 700) {
     int vis = (t - 700) / 70;
-    dotText("DOOBIE", vis, W / 2, 170, 7, 3.0f, C_TEAL);
+    dotText("DOOBIE", vis, W / 2, 168, 7, 3.0f, C_TEAL, 1, 0, W);   // 6 x 42 px: needs the full width
   }
   if (t > 1300) {
-    label("COMPANION", W / 2, 240, C_TEAL, 1);
+    label("COMPANION", W / 2, 236, C_TEAL, 1);
     g->fillRect(W / 2 - 4, 262, 8, 8, C_ORANGE);
   }
   if (t > 1600) {
-    label("OS 0.2", 16, 18, C_TEAL);
+    label("OS " FW_VERSION, 16, 18, C_TEAL);
     label("280X456", W - 16 - 7 * 12, 18, C_TEAL);
     label(serialTag, 16, H - 30, C_TEAL);
     label("BOOT OK", W - 16 - 7 * 12, H - 30, C_TEAL);
@@ -812,8 +850,8 @@ int choiceHover = 0, choicePicked = -1; uint32_t choiceFlash = 0;
 int obChoose(int stepN, const char *title, const Choice *c, int n) {
   uint32_t t = obT();
   drawBackground();
-  if (stepN > 0) stepHeaderN(stepN, title); else stepHeader("SET", title);
-  const int top = 52, bottom = H - 70, gap = 12, th = (bottom - top - gap * (n - 1)) / n;
+  if (stepN > 0) stepHeaderN(stepN, title); else stepHeader("", title);
+  const int top = 52, bottom = H - 70, gap = n >= 4 ? 8 : 12, th = (bottom - top - gap * (n - 1)) / n;
   auto idxAt = [&](int y) { return constrain((y - top) / (th + gap), 0, n - 1); };
   if (choicePicked < 0) {
     if (touchDown) choiceHover = idxAt(touchY);
@@ -829,8 +867,18 @@ int obChoose(int stepN, const char *title, const Choice *c, int n) {
     g->drawRect(x, y, w, th, C_INK); g->drawRect(x + 1, y + 1, w - 2, th - 2, C_INK);
     char key[2] = { (char)('A' + i), 0 };
     label(key, x + w - 22, y + 10, C_INK);
-    dotText(c[i].big, 99, x + 14, y + 14, 4, 1.7f, C_INK, 0, 0, w - 40);
-    if (c[i].small) label(c[i].small, x + 14, y + th - (strlen(c[i].small) > 18 ? 42 : 22), C_INK, 0, w - 28);
+    // Measure, then stack: big label, then the small one right under it.
+    // Shrink the big label to pitch 3 if needed; drop the small one if it
+    // still doesn't fit. Nothing is ever drawn past the tile edge.
+    const int bigW = w - 52, smallW = w - 28, padT = 12, padB = 10, between = 9;
+    int bp = 4, bl = textLines(c[i].big, 4, bigW);
+    int sl = c[i].small ? textLines(c[i].small, 2, smallW) : 0;
+    auto need = [&](int p, int l, int s2) { return padT + textHeight(l, p) + (s2 ? between + textHeight(s2, 2) : 0) + padB; };
+    if (need(bp, bl, sl) > th) { bp = 3; bl = textLines(c[i].big, 3, bigW); }
+    if (need(bp, bl, sl) > th) sl = 0;
+    int by = y + padT + (sl ? 0 : max(0, (th - padT - padB - textHeight(bl, bp)) / 2));
+    dotText(c[i].big, 99, x + 14, by, bp, bp == 4 ? 1.7f : 1.3f, C_INK, 0, 0, bigW);
+    if (sl) label(c[i].small, x + 14, by + textHeight(bl, bp) + between, C_INK, 0, smallW);
     if (hov && !flash) brackets(x, y, w, th, t / 1000.0f);
   }
   label(stepN > 0 ? "TAP TO PICK" : "TRIPLE-TAP ANYTIME", W / 2, H - 52, C_INK, 1);
@@ -841,7 +889,7 @@ int obChoose(int stepN, const char *title, const Choice *c, int n) {
 
 const Choice CH_SEX[]   = { {"HE", "HIM / MALE"}, {"SHE", "HER / FEMALE"}, {"SKIP", "RATHER NOT SAY"} };
 const Choice CH_AGE[]   = { {"UNDER 18", "KID MODE"}, {"18+", "GROWN-UP MODE"} };
-const Choice CH_SPICY[] = { {"KEEP IT CUTE", "FLIRTY, NEVER RUDE"}, {"UNLOCK SPICY", "CHEEKY LINES. MAY SAY THINGS IN PUBLIC."} };
+const Choice CH_TONE[]  = { {"REGULAR", "PET ATTITUDE. NO FLIRTING."}, {"FLIRTY", "CHARMING, NEVER RUDE."}, {"SPICY", "CHEEKY. MAY SAY IT IN PUBLIC."} };
 
 void obSex() {
   int r = obChoose(2, "WHO ARE YOU?", CH_SEX, 3);
@@ -850,28 +898,31 @@ void obSex() {
 void obAge() {
   int r = obChoose(3, "HOW OLD?", CH_AGE, 2);
   if (r >= 0) {
-    profAdult = (r == 1); profSpicy = false;
+    profAdult = (r == 1); profTone = 0;
     if (profAdult) obGo(OB_SPICY);
     else { obGo(OB_TILT); sayText("COOL! LET'S PLAY."); }
   }
 }
 void obSpicy() {
-  int r = obChoose(4, "SPICY MODE?", CH_SPICY, 2);
-  if (r >= 0) { profSpicy = (r == 1); obGo(OB_TILT); sayText(profSpicy ? "OH MY. ;)" : "CUTE IT IS."); }
+  int r = obChoose(4, "PICK A VIBE", CH_TONE, 3);
+  if (r >= 0) {
+    profTone = r; obGo(OB_TILT);
+    sayText(r == 2 ? "OH MY. ;)" : r == 1 ? "CHARMED, I'M SURE." : "OK. I'M THE BOSS.");
+  }
 }
 
 // Settings (triple-tap). Toggles apply instantly; closes after 10 s idle.
 uint32_t settingsTouched = 0;
 void openSettings() { obGo(OB_SETTINGS); settingsTouched = millis(); tapEvent = false; choicePicked = -1; speechText = nullptr; }
 void obSettings() {
-  static char modeTxt[16], spicyTxt[16];
-  snprintf(modeTxt, sizeof(modeTxt), "MODE: %s", darkMode ? "DARK" : "LIGHT");
-  snprintf(spicyTxt, sizeof(spicyTxt), "SPICY: %s", profSpicy ? "ON" : "OFF");
+  static char modeTxt[16], toneTxt[16];
+  snprintf(modeTxt, sizeof(modeTxt), "%s", darkMode ? "DARK MODE" : "LIGHT MODE");
+  snprintf(toneTxt, sizeof(toneTxt), "%s", TONE_NAME[profTone]);
   Choice items[5]; int n = 0, ids[5];
-  items[n] = { modeTxt, "LIGHT = TEAL, DARK = SAVES BATTERY" }; ids[n++] = 0;
-  if (profAdult) { items[n] = { spicyTxt, "CHEEKY LINES ON / OFF" }; ids[n++] = 1; }
+  items[n] = { modeTxt, "TAP TO SWITCH" }; ids[n++] = 0;
+  if (profAdult) { items[n] = { toneTxt, "TAP TO CHANGE VIBE" }; ids[n++] = 1; }
   items[n] = { "PROFILE", "REDO ONBOARDING" }; ids[n++] = 2;
-  items[n] = { "POWER OFF", "PRESS BOOT TO WAKE" }; ids[n++] = 4;
+  items[n] = { "POWER OFF", "BOOT WAKES IT" }; ids[n++] = 4;
   items[n] = { "EXIT", nullptr }; ids[n++] = 3;
   if (touchDown) settingsTouched = millis();
   int r = obChoose(0, "SETTINGS", items, n);
@@ -879,7 +930,7 @@ void obSettings() {
     settingsTouched = millis();
     switch (ids[r]) {
       case 0: applyTheme(!darkMode); prefs.putBool("dark", darkMode); break;
-      case 1: profSpicy = !profSpicy; prefs.putBool("spicy", profSpicy); break;
+      case 1: profTone = (profTone + 1) % 3; prefs.putUChar("tone", profTone); break;
       case 2: startOnboarding(); return;
       case 3: obGo(OB_FINISHED); sayText("BYE, SETTINGS."); lastMotion = millis(); return;
       case 4: obGo(OB_FINISHED); powerOff("GOODNIGHT."); return;
@@ -912,7 +963,7 @@ void obTap() {
   drawFace(t / 1000.0f);
   drawSpeech();
   progressDots(totalSteps(), totalSteps());
-  if (tapEvent || t > 15000) { tapEvent = false; setMood(HAPPY, 2000); blushT = 1; sayText(!profAdult ? "LET'S BE FRIENDS, {N}!" : profSpicy ? "WELL HELLO, {N}. ;)" : "NICE TO MEET YOU, {N}."); obGo(OB_DONE); }
+  if (tapEvent || t > 15000) { tapEvent = false; setMood(HAPPY, 2000); blushT = 1; sayText(!profAdult ? "LET'S BE FRIENDS, {N}!" : profTone == 2 ? "WELL HELLO, {N}. ;)" : profTone == 1 ? "NICE TO MEET YOU, {N}." : "YOU MAY PET ME NOW."); obGo(OB_DONE); }
 }
 void obDone() {
   uint32_t t = obT();
@@ -926,7 +977,7 @@ void obDone() {
   }
   if (t > 3200) {
     prefs.putBool("onb", true);
-    prefs.putUChar("sex", profSex); prefs.putBool("adult", profAdult); prefs.putBool("spicy", profAdult && profSpicy);
+    prefs.putUChar("sex", profSex); prefs.putBool("adult", profAdult); prefs.putUChar("tone", profAdult ? profTone : 0);
     talkative = true; lastMotion = millis(); nextIdleTalk = millis() + 20000;
     obGo(OB_FINISHED);
   }
@@ -1032,8 +1083,11 @@ void setup() {
   bool onboarded = prefs.getBool("onb", false) && prefs.isKey("adult");   // re-run if no profile yet
   applyTheme(prefs.getBool("dark", false));
   profSex = prefs.getUChar("sex", 2); profAdult = prefs.getBool("adult", false);
-  profSpicy = profAdult && prefs.getBool("spicy", false);
-  Serial.printf("Profile: sex=%d adult=%d spicy=%d\n", profSex, profAdult, profSpicy);
+  // 0.3 stored a "spicy" bool; map it: spicy -> 2, otherwise flirty (what 0.3 adults got)
+  if (prefs.isKey("tone")) profTone = prefs.getUChar("tone", 0);
+  else profTone = prefs.getBool("spicy", false) ? 2 : (profAdult ? 1 : 0);
+  if (!profAdult) profTone = 0;
+  Serial.printf("Profile: sex=%d adult=%d tone=%s\n", profSex, profAdult, TONE_NAME[profTone]);
   curL = curR = moodShape(NEUTRAL, true);
   randomSeed(esp_random());
   lastMotion = millis();
