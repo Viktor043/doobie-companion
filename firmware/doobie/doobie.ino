@@ -1,6 +1,6 @@
 // ============================================================================
 //  DOOBIE COMPANION, firmware 0.3
-//  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64 (V1, 280x456 AMOLED, CO5300/SH8601)
+//  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
 //          BOOT button GPIO0
@@ -14,6 +14,7 @@
 //  tilt and tap tutorial. The result is saved in NVS.
 //  Optional mic: Adafruit PDM MEMS mic (#3492) on GPIO5 = CLK, GPIO6 = DAT,
 //  auto-detected at boot. Without it the noise reactions are simply off.
+//    Triple-tap screen: settings (mode, spicy, redo onboarding)
 //    BOOT short press : toggle light / dark
 //    BOOT hold 2 s    : run onboarding again
 // ============================================================================
@@ -26,9 +27,11 @@
 #include "eyetypes.h"
 #include "phrases.h"
 
-// ---------- pins (Waveshare 1.64 V1; V1.1 moved LCD CS to GPIO46) ----------
+// ---------- pins (Waveshare 1.64; V1.1 moved LCD CS to GPIO46, see detectBoard) ----------
 #define PIN_LCD_RST   21
-#define PIN_QSPI_CS    9
+#define PIN_QSPI_CS_V1    9
+#define PIN_QSPI_CS_V11  46
+#define PIN_TP_INT_V11   18   // V1.1 only: 4.7k pull-up to 3V3, unconnected on V1
 #define PIN_QSPI_CLK  10
 #define PIN_QSPI_D0   11
 #define PIN_QSPI_D1   12
@@ -49,10 +52,21 @@ uint8_t ADDR_IMU = 0x6B;
 #define GAZE_SIGN_X  (+1.0f)
 #define GAZE_SIGN_Y  (-1.0f)
 
-Arduino_DataBus *bus = new Arduino_ESP32QSPI(PIN_QSPI_CS, PIN_QSPI_CLK,
-    PIN_QSPI_D0, PIN_QSPI_D1, PIN_QSPI_D2, PIN_QSPI_D3);
-Arduino_CO5300 *panel = new Arduino_CO5300(bus, PIN_LCD_RST, 0, false, W, H, COL_OFFSET, 0, COL_OFFSET, 0);
-Arduino_Canvas *g = new Arduino_Canvas(W, H, panel);
+Arduino_DataBus *bus = nullptr;     // created in setup() once the board revision is known
+Arduino_CO5300 *panel = nullptr;
+Arduino_Canvas *g = nullptr;
+bool boardV11 = false;
+
+// V1.1 routes TP_INT to GPIO18 with an external 4.7k pull-up; on V1 the pin is
+// unconnected. With the internal pull-down on, V1.1 reads HIGH and V1 reads LOW.
+bool detectBoardV11() {
+  pinMode(PIN_TP_INT_V11, INPUT_PULLDOWN);
+  delay(3);
+  int hi = 0;
+  for (int i = 0; i < 8; i++) { hi += digitalRead(PIN_TP_INT_V11); delayMicroseconds(200); }
+  pinMode(PIN_TP_INT_V11, INPUT);
+  return hi >= 6;
+}
 Preferences prefs;
 
 static inline uint16_t rgb(uint8_t r, uint8_t gg, uint8_t b) {
@@ -470,6 +484,7 @@ uint32_t lastMotion = 0, touchStart = 0, freefallStart = 0;
 bool wasTouch = false, asleep = false, talkative = true;
 uint32_t asleepSince = 0;
 bool tapEvent = false;            // consumed by onboarding
+bool tripleTap = false;           // opens settings
 uint8_t brightness = 255, brightTarget = 255;
 
 void wake(Mood m) {
@@ -504,6 +519,9 @@ void behave(float dt) {
   }
   if (!touchDown && wasTouch && now - touchStart < 700) {
     tapEvent = true;
+    static uint32_t tapTimes[3] = {0, 0, 0};
+    tapTimes[0] = tapTimes[1]; tapTimes[1] = tapTimes[2]; tapTimes[2] = now;
+    if (tapTimes[0] && now - tapTimes[0] < 900) { tripleTap = true; tapTimes[0] = tapTimes[1] = tapTimes[2] = 0; }
     if (asleep) wake(ANGRY);
     else { setMood(HAPPY, 1600); blushT = 1; if (talkative) say(EV_TAP); }
     lastMotion = now;
@@ -525,7 +543,7 @@ void behave(float dt) {
   if (now > nextBat) {
     nextBat = now + 2000;
     float v = 0; for (int i = 0; i < 8; i++) v += batteryV(); v /= 8;
-    bool usb = v > 4.45f;
+    bool usb = !boardV11 && v > 4.45f;   // V1.1 measures VBAT directly: no USB sense
     if (!usb) batV = firstBat ? v : batV * 0.8f + v * 0.2f;
     if (!firstBat && usb != onUsb) {
       if (asleep) wake(NEUTRAL); else lastMotion = now;
@@ -627,8 +645,9 @@ uint32_t obT0 = 0;
 int modeHover = 0;               // 0 light, 1 dark
 char serialTag[12];
 
-void obGo(OnbStep s) { ob = s; obT0 = millis(); }
+void obGo(OnbStep s) { ob = s; obT0 = millis(); tripleTap = false; }
 void stepHeader(const char *num, const char *title);
+void startOnboarding();
 uint32_t obT() { return millis() - obT0; }
 
 // tiny label: pitch 2 → effectively a 2x pixel font
@@ -769,7 +788,7 @@ int choiceHover = 0, choicePicked = -1; uint32_t choiceFlash = 0;
 int obChoose(int stepN, const char *title, const Choice *c, int n) {
   uint32_t t = obT();
   drawBackground();
-  stepHeaderN(stepN, title);
+  if (stepN > 0) stepHeaderN(stepN, title); else stepHeader("SET", title);
   const int top = 52, bottom = H - 70, gap = 12, th = (bottom - top - gap * (n - 1)) / n;
   auto idxAt = [&](int y) { return constrain((y - top) / (th + gap), 0, n - 1); };
   if (choicePicked < 0) {
@@ -790,8 +809,8 @@ int obChoose(int stepN, const char *title, const Choice *c, int n) {
     if (c[i].small) label(c[i].small, x + 14, y + th - (strlen(c[i].small) > 18 ? 42 : 22), C_INK, 0, w - 28);
     if (hov && !flash) brackets(x, y, w, th, t / 1000.0f);
   }
-  label("TAP TO PICK", W / 2, H - 52, C_INK, 1);
-  progressDots(stepN, totalSteps());
+  label(stepN > 0 ? "TAP TO PICK" : "TRIPLE-TAP ANYTIME", W / 2, H - 52, C_INK, 1);
+  if (stepN > 0) progressDots(stepN, totalSteps());
   if (choicePicked >= 0 && millis() - choiceFlash > 480) { int r = choicePicked; choicePicked = -1; choiceHover = 0; return r; }
   return -1;
 }
@@ -815,6 +834,32 @@ void obAge() {
 void obSpicy() {
   int r = obChoose(4, "SPICY MODE?", CH_SPICY, 2);
   if (r >= 0) { profSpicy = (r == 1); obGo(OB_TILT); sayText(profSpicy ? "OH MY. ;)" : "CUTE IT IS."); }
+}
+
+// Settings (triple-tap). Toggles apply instantly; closes after 10 s idle.
+uint32_t settingsTouched = 0;
+void openSettings() { obGo(OB_SETTINGS); settingsTouched = millis(); tapEvent = false; choicePicked = -1; speechText = nullptr; }
+void obSettings() {
+  static char modeTxt[16], spicyTxt[16];
+  snprintf(modeTxt, sizeof(modeTxt), "MODE: %s", darkMode ? "DARK" : "LIGHT");
+  snprintf(spicyTxt, sizeof(spicyTxt), "SPICY: %s", profSpicy ? "ON" : "OFF");
+  Choice items[4]; int n = 0, ids[4];
+  items[n] = { modeTxt, "LIGHT = TEAL, DARK = SAVES BATTERY" }; ids[n++] = 0;
+  if (profAdult) { items[n] = { spicyTxt, "CHEEKY LINES ON / OFF" }; ids[n++] = 1; }
+  items[n] = { "PROFILE", "REDO ONBOARDING" }; ids[n++] = 2;
+  items[n] = { "EXIT", nullptr }; ids[n++] = 3;
+  if (touchDown) settingsTouched = millis();
+  int r = obChoose(0, "SETTINGS", items, n);
+  if (r >= 0) {
+    settingsTouched = millis();
+    switch (ids[r]) {
+      case 0: applyTheme(!darkMode); prefs.putBool("dark", darkMode); break;
+      case 1: profSpicy = !profSpicy; prefs.putBool("spicy", profSpicy); break;
+      case 2: startOnboarding(); return;
+      case 3: obGo(OB_FINISHED); sayText("BYE, SETTINGS."); lastMotion = millis(); return;
+    }
+  }
+  if (millis() - settingsTouched > 10000) { obGo(OB_FINISHED); lastMotion = millis(); }
 }
 
 void obTilt() {
@@ -891,11 +936,22 @@ void setup() {
   pinMode(PIN_BOOT, INPUT_PULLUP);
   Wire.begin(PIN_SDA, PIN_SCL, 400000);
   imuInit();
-  i2cWrite(ADDR_TOUCH, 0x00, 0x00);
   analogReadResolution(12);
   micInit();
 
+  boardV11 = detectBoardV11();
+  Serial.printf("Board: ESP32-S3-Touch-AMOLED-1.64 %s\n", boardV11 ? "V1.1" : "V1");
+  bus = new Arduino_ESP32QSPI(boardV11 ? PIN_QSPI_CS_V11 : PIN_QSPI_CS_V1, PIN_QSPI_CLK,
+                              PIN_QSPI_D0, PIN_QSPI_D1, PIN_QSPI_D2, PIN_QSPI_D3);
+  panel = new Arduino_CO5300(bus, PIN_LCD_RST, 0, false, W, H, COL_OFFSET, 0, COL_OFFSET, 0);
+  g = new Arduino_Canvas(W, H, panel);
   if (!g->begin()) Serial.println("Canvas alloc failed (PSRAM?)");
+  delay(200);                                  // V1.1: touch shares LCD reset, let it boot
+  i2cWrite(ADDR_TOUCH, 0x00, 0x00);            // FT3168: normal operating mode
+  i2cWrite(ADDR_TOUCH, 0x86, 0x00);            // stay active, don't auto-drop to monitor mode
+  Serial.print("I2C:");
+  for (uint8_t a = 1; a < 127; a++) { Wire.beginTransmission(a); if (Wire.endTransmission() == 0) Serial.printf(" 0x%02X", a); }
+  Serial.println();
   panel->setBrightness(255);
   for (int f = 0; f < GRAIN_FRAMES; f++) bgFrames[f] = (uint16_t *)heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
   bgBlack = (uint16_t *)heap_caps_malloc(W * H * 2, MALLOC_CAP_SPIRAM);
@@ -927,6 +983,7 @@ void loop() {
   last = now;
 
   pollButton();
+  talkative = (ob == OB_FINISHED);
   behave(dt);
 
   // Power saving for the 150 mAh cell: ~12 fps while asleep, panel fully off
@@ -950,7 +1007,9 @@ void loop() {
     case OB_TILT:      obTilt(); break;
     case OB_TAP:       obTap(); break;
     case OB_DONE:      obDone(); break;
+    case OB_SETTINGS:  obSettings(); break;
     default:
+      if (tripleTap) { tripleTap = false; openSettings(); break; }
       tapEvent = false;
       drawBackground();
       drawFace(now / 1000.0f);
