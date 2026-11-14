@@ -72,6 +72,11 @@ static const char *const B_LOUD[]  = { "TOO LOUD!", "MY EARS!", "INSIDE VOICE!",
 static const char *const B_BANG[]  = { "WHOA!", "WHAT WAS THAT?!", "EEK!", "DON'T DO THAT!", "JUMPSCARE!" };
 static const char *const B_PARTY[] = { "PARTY?!", "IS THAT MUSIC?", "DANCE WITH ME.", "TURN IT UP!", "BOP BOP BOP." };
 
+// power (USB plug / unplug)
+static const char *const B_CHARGE[] = { "YUM. CHARGING.", "POWER SNACK!", "ENERGY IN.", "MMM, ELECTRONS.", "THANKS FOR THE JUICE." };
+static const char *const B_UNPLUG[] = { "UNPLUGGED.", "ON MY OWN NOW.", "BATTERY MODE.", "BYE, CABLE." };
+static const char *const S_CHARGE[] = { "OOH, PLUGGED IN.", "THAT'S THE SPOT." };
+
 // ------------------------------------------------------------------ KID -----
 static const char *const K_IDLE[] = {
   "YOU'RE AWESOME.", "HIGH FIVE!", "DRINK SOME WATER.", "HOMEWORK DONE?",
@@ -110,7 +115,7 @@ static const char *const S_QUIET[] = { "JUST US NOW...", "FINALLY ALONE.", "SO..
 enum Ev : uint8_t {
   EV_GREET, EV_TAP, EV_LOVE, EV_SHAKE, EV_BUMP, EV_DROP, EV_FLIP, EV_SLEEPY, EV_WAKE,
   EV_GRUMPY, EV_IDLE, EV_SUS, EV_ROLL, EV_CROSS, EV_WINK, EV_LOWBAT,
-  EV_QUIET, EV_TALK, EV_LOUD, EV_BANG, EV_PARTY, EV_COUNT
+  EV_QUIET, EV_TALK, EV_LOUD, EV_BANG, EV_PARTY, EV_CHARGE, EV_UNPLUG, EV_COUNT
 };
 struct EvPools { Pool base, adult, spicy; };
 static const EvPools EVENTS[EV_COUNT] = {
@@ -135,6 +140,8 @@ static const EvPools EVENTS[EV_COUNT] = {
   /* LOUD   */ { POOL(B_LOUD),   NOPOOL,        POOL(S_LOUD) },
   /* BANG   */ { POOL(B_BANG),   NOPOOL,        NOPOOL },
   /* PARTY  */ { POOL(B_PARTY),  NOPOOL,        NOPOOL },
+  /* CHARGE */ { POOL(B_CHARGE), NOPOOL,        POOL(S_CHARGE) },
+  /* UNPLUG */ { POOL(B_UNPLUG), NOPOOL,        NOPOOL },
 };
 static const Pool KID_IDLE = POOL(K_IDLE);
 

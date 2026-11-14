@@ -152,7 +152,13 @@ void touchRead() {
   touchDown = (b[0] & 0x0F) > 0;
   if (touchDown) { touchX = ((b[1] & 0x0F) << 8) | b[2]; touchY = ((b[3] & 0x0F) << 8) | b[4]; }
 }
+// V1 board: the divider sits on the system rail (VCC), not VBAT. On USB it reads
+// ~4.7 V; on battery VCC = VBAT through the AO3401 power-path FET, so it reads
+// the cell. Charging is done in hardware by the ETA6098 (CHG LED); STAT isn't
+// wired to a GPIO, so "on USB" is the best the firmware can know.
 float batteryV() { return analogReadMilliVolts(PIN_BAT_ADC) * 3.0f / 1000.0f; }
+float batV = 4.0f; bool onUsb = false;
+int batteryPct() { return (int)clampf((batV - 3.30f) / (4.15f - 3.30f) * 100.0f, 0, 100); }
 
 // --- PDM microphone (optional add-on). Level in dBFS, computed on core 0.
 #define MIC_CLK   5
@@ -160,14 +166,14 @@ float batteryV() { return analogReadMilliVolts(PIN_BAT_ADC) * 3.0f / 1000.0f; }
 #define MIC_LOUD_DB  (-38.0f)   // sustained loud (~80 dB SPL with MP34DT01, -26 dBFS @ 94 dB)
 #define MIC_QUIET_DB (-75.0f)   // near silence
 #define MIC_BANG_DB  (-28.0f)   // clap / bang peak
-I2SClass micI2S;
+I2SClass *micI2S = nullptr;   // must live in internal RAM (DMA callback context)
 volatile float micDb = -90, micPeakDb = -90;
 volatile bool micOk = false;
 void micTask(void *) {
   static int16_t buf[256];
   float dc = 0; uint32_t start = millis(); bool decided = false;
   for (;;) {
-    size_t n = micI2S.readBytes((char *)buf, sizeof(buf)) / 2;
+    size_t n = micI2S->readBytes((char *)buf, sizeof(buf)) / 2;
     if (!n) { vTaskDelay(5); continue; }
     double acc = 0; int16_t mn = 32767, mx = -32768;
     for (size_t i = 0; i < n; i++) {
@@ -182,16 +188,31 @@ void micTask(void *) {
       else if (millis() - start > 2500) {
         decided = true;
         Serial.println("Mic: none (wire a PDM mic: GPIO5 CLK, GPIO6 DAT)");
-        micI2S.end(); vTaskDelete(NULL);
+        micI2S->end(); vTaskDelete(NULL);
       }
     }
   }
 }
 void micInit() {
-  micI2S.setPinsPdmRx(MIC_CLK, MIC_DATA);
-  if (!micI2S.begin(I2S_MODE_PDM_RX, 16000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
-    Serial.println("Mic: I2S init failed"); return;
+  void *mem = heap_caps_malloc(sizeof(I2SClass), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!mem) return;
+  micI2S = new (mem) I2SClass();
+  micI2S->setPinsPdmRx(MIC_CLK, MIC_DATA);
+  // arduino-esp32 3.1 + PSRAM: the I2S driver allocates its channel object with
+  // MALLOC_CAP_DEFAULT, which can land in PSRAM, and the GDMA ISR then rejects
+  // it ("user context not in internal RAM"). Workaround: briefly reserve all
+  // free PSRAM so that allocation has to come from internal RAM, then release.
+  void *hold[96]; int nh = 0;
+  while (nh < 96) {
+    size_t big = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    if (big < 16) break;
+    hold[nh] = heap_caps_malloc(big, MALLOC_CAP_SPIRAM);
+    if (!hold[nh]) break;
+    nh++;
   }
+  bool ok = micI2S->begin(I2S_MODE_PDM_RX, 16000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+  while (nh) heap_caps_free(hold[--nh]);
+  if (!ok) { Serial.println("Mic: I2S init failed"); return; }
   gpio_pulldown_en((gpio_num_t)MIC_DATA);   // no mic -> constant bitstream -> detected as absent
   xTaskCreatePinnedToCore(micTask, "mic", 4096, nullptr, 1, nullptr, 0);
 }
@@ -500,11 +521,24 @@ void behave(float dt) {
   else if (still < 20000 && baseMood == SLEEPY) baseMood = NEUTRAL;
   brightTarget = asleep ? 40 : 255;
 
-  static uint32_t nextBat = 5000;
+  static uint32_t nextBat = 0; static bool firstBat = true;
   if (now > nextBat) {
-    nextBat = now + 15000;
-    float v = batteryV();
-    if (v > 2.5f && v < 3.45f && baseMood == NEUTRAL) { baseMood = SAD; if (talkative) say(EV_LOWBAT); }
+    nextBat = now + 2000;
+    float v = 0; for (int i = 0; i < 8; i++) v += batteryV(); v /= 8;
+    bool usb = v > 4.45f;
+    if (!usb) batV = firstBat ? v : batV * 0.8f + v * 0.2f;
+    if (!firstBat && usb != onUsb) {
+      if (asleep) wake(NEUTRAL); else lastMotion = now;
+      setMood(usb ? HAPPY : NEUTRAL, 1500);
+      if (talkative) say(usb ? EV_CHARGE : EV_UNPLUG);
+      if (usb && baseMood == SAD) baseMood = NEUTRAL;
+    }
+    onUsb = usb; firstBat = false;
+    static uint32_t lastLowTalk = 0;
+    if (!usb && batV > 2.5f && batV < 3.45f && baseMood == NEUTRAL) {
+      baseMood = SAD;
+      if (talkative && now - lastLowTalk > 120000) { lastLowTalk = now; say(EV_LOWBAT); }
+    }
   }
 
   if (moodUntil && now > moodUntil) { mood = baseMood; moodUntil = 0; }
@@ -873,7 +907,7 @@ void setup() {
   snprintf(serialTag, sizeof(serialTag), "SN %06X", (uint32_t)(mac >> 24) & 0xFFFFFF);
 
   prefs.begin("doobie", false);
-  bool onboarded = prefs.getBool("onb", false);
+  bool onboarded = prefs.getBool("onb", false) && prefs.isKey("adult");   // re-run if no profile yet
   applyTheme(prefs.getBool("dark", false));
   profSex = prefs.getUChar("sex", 2); profAdult = prefs.getBool("adult", false);
   profSpicy = profAdult && prefs.getBool("spicy", false);
@@ -921,14 +955,19 @@ void loop() {
       drawBackground();
       drawFace(now / 1000.0f);
       drawSpeech();
+      {   // tiny status: USB while plugged, battery % otherwise
+        char st[8];
+        if (onUsb) snprintf(st, sizeof(st), "USB"); else snprintf(st, sizeof(st), "%d%%", batteryPct());
+        label(st, W - 16 - strlen(st) * 12, H - 28, onUsb ? C_ORANGE : C_INK);
+      }
   }
   g->flush();
   if (asleep) delay(60);
 
   if (now - lastLog > 500) {
     lastLog = now;
-    Serial.printf("mic=%s%.0fdB ob=%d dark=%d a=%.2f,%.2f,%.2f touch=%d(%d,%d) bat=%.2fV mood=%d sp=%d say=\"%s\" fps=%.0f\n",
-                  micOk ? "" : "off/", (float)micDb, ob, darkMode, ax, ay, az, touchDown, touchX, touchY, batteryV(), mood, special,
+    Serial.printf("usb=%d batV=%.2f mic=%s%.0fdB ob=%d dark=%d a=%.2f,%.2f,%.2f touch=%d(%d,%d) bat=%.2fV mood=%d sp=%d say=\"%s\" fps=%.0f\n",
+                  onUsb, batV, micOk ? "" : "off/", (float)micDb, ob, darkMode, ax, ay, az, touchDown, touchX, touchY, batteryV(), mood, special,
                   speaking() ? speechText : "", 1.0f / dt);
   }
 }
