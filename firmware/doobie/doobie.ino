@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 0.4
+//  DOOBIE COMPANION, firmware 0.5
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -14,7 +14,7 @@
 //  tilt and tap tutorial. The result is saved in NVS.
 //  Optional mic: Adafruit PDM MEMS mic (#3492) on GPIO5 = CLK, GPIO6 = DAT,
 //  auto-detected at boot. Without it the noise reactions are simply off.
-//    Triple-tap screen: settings (mode, spicy, redo onboarding)
+//    4 taps in 1 s : settings (focus timer, clock, mode, vibe, profile, power)
 //    BOOT short press : toggle light / dark (wakes it when off)
 //    BOOT hold 2 s    : power off (deep sleep); press BOOT or RST to turn on
 // ============================================================================
@@ -26,10 +26,12 @@
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
+#include <sys/time.h>
+#include <time.h>
 #include "eyetypes.h"
 #include "phrases.h"
 
-#define FW_VERSION "0.4"
+#define FW_VERSION "0.5"
 
 void powerOff(const char *msg);
 extern OnbStep ob;
@@ -193,6 +195,36 @@ bool readChargeFull() {
   return false;
 #endif
 }
+// ---- Clock. No RTC chip on this board: the ESP32's own RTC timer keeps time
+// while powered, including deep sleep. Lost on battery disconnect / RST.
+// Stored as local wall time (treated as UTC internally; no timezone math).
+// Set from settings, or over USB serial with "T<local epoch>\n".
+#define CLOCK_MIN_VALID 1735689600L      // 2025-01-01
+bool clockValid() { return time(nullptr) > CLOCK_MIN_VALID; }
+void setClock(time_t t) { struct timeval tv = { t, 0 }; settimeofday(&tv, nullptr); }
+bool localHM(int &h, int &m) {
+  if (!clockValid()) return false;
+  time_t t = time(nullptr); struct tm tmv; gmtime_r(&t, &tmv);
+  h = tmv.tm_hour; m = tmv.tm_min; return true;
+}
+int localHour() { int h, m; return localHM(h, m) ? h : -1; }
+bool isNight()   { int h = localHour(); return h >= 22 || (h >= 0 && h < 5); }
+bool isMorning() { int h = localHour(); return h >= 6 && h < 10; }
+void pollSerial() {
+  static char buf[24]; static int n = 0;
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      buf[n] = 0;
+      if (buf[0] == 'T') {
+        long long t = atoll(buf + 1);
+        if (t > CLOCK_MIN_VALID) { setClock((time_t)t); int h, m; localHM(h, m); Serial.printf("clock set %02d:%02d\n", h, m); }
+      }
+      n = 0;
+    } else if (n < 23) buf[n++] = c;
+  }
+}
+
 int batteryPct() { return (int)clampf((batV - 3.30f) / (4.15f - 3.30f) * 100.0f, 0, 100); }
 
 // --- PDM microphone (optional add-on). Level in dBFS, computed on core 0.
@@ -429,6 +461,7 @@ EyeShape moodShape(Mood m, bool left) {
     case SUSPICIOUS: return left ? EyeShape{120, 140, 34, 0.50f, 0.20f, 0.2f}
                                  : EyeShape{115, 150, 40, 0.10f, 0.00f, 0.0f};
     case PANIC:      return {80, 95, 46, 0.00f, 0.00f, 0.0f};
+    case FOCUS:      return {126, 118, 28, 0.22f, 0.10f, 0.10f};   // determined squint
     default:         return {115, 150, 40, 0.00f, 0.00f, 0.0f};
   }
 }
@@ -533,6 +566,17 @@ void drawFace(float t) {
 }
 
 // ============================================================================
+//  Pomodoro: 25 min focus / 5 min break, every 4th break 15 min.
+// ============================================================================
+enum : uint8_t { POMO_OFF, POMO_FOCUS, POMO_BREAK };
+uint8_t pomo = POMO_OFF, pomoCount = 0;
+uint32_t pomoEnd = 0, pomoLen = 0;
+#define FOCUS_MS  (25UL * 60000UL)
+#define BREAK_MS  (5UL * 60000UL)
+#define LBREAK_MS (15UL * 60000UL)
+uint32_t pomoLeft() { return pomo ? (uint32_t)max(0L, (long)(pomoEnd - millis())) : 0; }
+
+// ============================================================================
 //  Behaviour
 // ============================================================================
 float shakeEnergy = 0, gravX = 0, gravY = 0, gravZ = 1;
@@ -540,7 +584,7 @@ uint32_t lastMotion = 0, touchStart = 0, freefallStart = 0;
 bool wasTouch = false, asleep = false, talkative = true;
 uint32_t asleepSince = 0;
 bool tapEvent = false;            // consumed by onboarding
-bool tripleTap = false;           // opens settings
+bool tripleTap = false;           // 4-tap gesture: opens settings
 uint8_t brightness = 255, brightTarget = 255;
 
 void wake(Mood m) {
@@ -575,10 +619,12 @@ void behave(float dt) {
   }
   if (!touchDown && wasTouch && now - touchStart < 700) {
     tapEvent = true;
-    static uint32_t tapTimes[3] = {0, 0, 0};
-    tapTimes[0] = tapTimes[1]; tapTimes[1] = tapTimes[2]; tapTimes[2] = now;
-    if (tapTimes[0] && now - tapTimes[0] < 900) { tripleTap = true; tapTimes[0] = tapTimes[1] = tapTimes[2] = 0; }
+    static uint32_t tapTimes[4] = {0, 0, 0, 0};          // 4 taps within 1 s -> settings
+    for (int k = 0; k < 3; k++) tapTimes[k] = tapTimes[k + 1];
+    tapTimes[3] = now;
+    if (tapTimes[0] && now - tapTimes[0] < 1000) { tripleTap = true; for (auto &tt : tapTimes) tt = 0; }
     if (asleep) wake(ANGRY);
+    else if (pomo == POMO_FOCUS) { setMood(FOCUS, 800); if (talkative && random(3) == 0) say(EV_SHH); }
     else { setMood(HAPPY, 1600); blushT = 1; if (talkative) say(EV_TAP); }
     lastMotion = now;
   }
@@ -589,10 +635,12 @@ void behave(float dt) {
   else if (baseMood == ANGRY) baseMood = NEUTRAL;
 
   // drowsiness
+  if (pomo != POMO_OFF) lastMotion = now;            // stay awake through a pomodoro
   uint32_t still = now - lastMotion;
-  if (!asleep && still > 45000) { asleep = true; asleepSince = now; special = SP_ASLEEP; specialUntil = UINT32_MAX; speechText = nullptr; }
-  else if (!asleep && still > 20000 && baseMood == NEUTRAL) { baseMood = SLEEPY; if (talkative) say(EV_SLEEPY); }
-  else if (still < 20000 && baseMood == SLEEPY) baseMood = NEUTRAL;
+  const uint32_t sleepyAt = isNight() ? 10000 : 20000, asleepAt = isNight() ? 25000 : 45000;
+  if (!asleep && still > asleepAt) { asleep = true; asleepSince = now; special = SP_ASLEEP; specialUntil = UINT32_MAX; speechText = nullptr; }
+  else if (!asleep && still > sleepyAt && baseMood == NEUTRAL) { baseMood = SLEEPY; if (talkative) say(EV_SLEEPY); }
+  else if (still < sleepyAt && baseMood == SLEEPY) baseMood = NEUTRAL;
   brightTarget = asleep ? 40 : 255;
 
   static uint32_t nextBat = 0; static bool firstBat = true;
@@ -619,6 +667,19 @@ void behave(float dt) {
     }
   }
 
+  if (pomo != POMO_OFF && (int32_t)(now - pomoEnd) >= 0) {
+    if (pomo == POMO_FOCUS) {
+      pomoCount++;
+      pomo = POMO_BREAK; pomoLen = (pomoCount % 4 == 0) ? LBREAK_MS : BREAK_MS;
+      setMood(HAPPY, 2500); blushT = 1; say(EV_BREAK);
+    } else {
+      pomo = POMO_FOCUS; pomoLen = FOCUS_MS; say(EV_FOCUS);
+    }
+    pomoEnd = now + pomoLen;
+    if (asleep) wake(NEUTRAL);
+  }
+  if (pomo == POMO_FOCUS && baseMood == NEUTRAL) baseMood = FOCUS;
+  else if (pomo != POMO_FOCUS && baseMood == FOCUS) baseMood = NEUTRAL;
   if (moodUntil && now > moodUntil) { mood = baseMood; moodUntil = 0; }
   if (!moodUntil) mood = baseMood;
   if (special != SP_NONE && special != SP_ASLEEP && now > specialUntil) {
@@ -664,7 +725,7 @@ void behave(float dt) {
     glanceX = c ? 0 : random(-55, 56); glanceY = c ? 0 : random(-30, 31);
     nextGlance = now + random(900, 3200);
   }
-  if (talkative && now > nextTrick && special == SP_NONE && !asleep && mood == baseMood) {
+  if (talkative && now > nextTrick && special == SP_NONE && !asleep && mood == baseMood && pomo != POMO_FOCUS) {
     switch (random(5)) {
       case 0: rollPhase = 0; if (random(2)) say(EV_ROLL, false); break;
       case 1: blinkT = 0; blinkWhich = 1; say(EV_WINK, false); break;
@@ -674,7 +735,12 @@ void behave(float dt) {
     }
     nextTrick = now + random(9000, 22000);
   }
-  if (talkative && now > nextIdleTalk && !asleep && special == SP_NONE) say(EV_IDLE, false);
+  if (talkative && now > nextIdleTalk && !asleep && special == SP_NONE && pomo != POMO_FOCUS) {
+    Ev e = EV_IDLE;
+    if (isMorning() && random(100) < 30) e = EV_MORNING;
+    else if (isNight() && random(100) < 35) e = EV_NIGHT;
+    say(e, false);
+  }
 
   if (convergeT > 0) { converge = approach(converge, convergeT, 6, dt); if (converge > convergeT - 1) convergeT = -1; }
   else converge = approach(converge, 0, 3, dt);
@@ -881,7 +947,7 @@ int obChoose(int stepN, const char *title, const Choice *c, int n) {
     if (sl) label(c[i].small, x + 14, by + textHeight(bl, bp) + between, C_INK, 0, smallW);
     if (hov && !flash) brackets(x, y, w, th, t / 1000.0f);
   }
-  label(stepN > 0 ? "TAP TO PICK" : "TRIPLE-TAP ANYTIME", W / 2, H - 52, C_INK, 1);
+  label(stepN > 0 ? "TAP TO PICK" : "4 TAPS: SETTINGS", W / 2, H - 52, C_INK, 1);
   if (stepN > 0) progressDots(stepN, totalSteps());
   if (choicePicked >= 0 && millis() - choiceFlash > 480) { int r = choicePicked; choicePicked = -1; choiceHover = 0; return r; }
   return -1;
@@ -911,32 +977,96 @@ void obSpicy() {
   }
 }
 
-// Settings (triple-tap). Toggles apply instantly; closes after 10 s idle.
+// Settings (4 taps in 1 s). Two pages; toggles apply instantly; closes after 10 s idle.
 uint32_t settingsTouched = 0;
-void openSettings() { obGo(OB_SETTINGS); settingsTouched = millis(); tapEvent = false; choicePicked = -1; speechText = nullptr; }
+int settingsPage = 0;
+void openSettings() { obGo(OB_SETTINGS); settingsPage = 0; settingsTouched = millis(); tapEvent = false; choicePicked = -1; speechText = nullptr; }
+void openClockSet();
+void pomoStart() { pomo = POMO_FOCUS; pomoLen = FOCUS_MS; pomoEnd = millis() + pomoLen; pomoCount = 0; setMood(FOCUS, 1500); sayText("FOCUS TIME. 25 MIN."); }
+void pomoStop()  { pomo = POMO_OFF; sayText("FOCUS OFF. GOOD JOB."); }
+
 void obSettings() {
-  static char modeTxt[16], toneTxt[16];
-  snprintf(modeTxt, sizeof(modeTxt), "%s", darkMode ? "DARK MODE" : "LIGHT MODE");
-  snprintf(toneTxt, sizeof(toneTxt), "%s", TONE_NAME[profTone]);
+  static char modeTxt[16], toneTxt[16], clockTxt[16], focusTxt[16];
   Choice items[5]; int n = 0, ids[5];
-  items[n] = { modeTxt, "TAP TO SWITCH" }; ids[n++] = 0;
-  if (profAdult) { items[n] = { toneTxt, "TAP TO CHANGE VIBE" }; ids[n++] = 1; }
-  items[n] = { "PROFILE", "REDO ONBOARDING" }; ids[n++] = 2;
-  items[n] = { "POWER OFF", "BOOT WAKES IT" }; ids[n++] = 4;
-  items[n] = { "EXIT", nullptr }; ids[n++] = 3;
+  if (settingsPage == 0) {
+    snprintf(focusTxt, sizeof(focusTxt), "%s", pomo ? "STOP FOCUS" : "FOCUS 25");
+    items[n] = { focusTxt, pomo ? "END THE POMODORO" : "25 MIN FOCUS, 5 BREAK" }; ids[n++] = 10;
+    int h, m;
+    if (localHM(h, m)) snprintf(clockTxt, sizeof(clockTxt), "TIME %02d:%02d", h, m); else snprintf(clockTxt, sizeof(clockTxt), "SET TIME");
+    items[n] = { clockTxt, "TAP TO SET THE CLOCK" }; ids[n++] = 11;
+    snprintf(modeTxt, sizeof(modeTxt), "%s", darkMode ? "DARK MODE" : "LIGHT MODE");
+    items[n] = { modeTxt, "TAP TO SWITCH" }; ids[n++] = 0;
+    if (profAdult) { snprintf(toneTxt, sizeof(toneTxt), "%s", TONE_NAME[profTone]); items[n] = { toneTxt, "TAP TO CHANGE VIBE" }; ids[n++] = 1; }
+    items[n] = { "MORE...", nullptr }; ids[n++] = 12;
+  } else {
+    items[n] = { "PROFILE", "REDO ONBOARDING" }; ids[n++] = 2;
+    items[n] = { "POWER OFF", "BOOT WAKES IT" }; ids[n++] = 4;
+    items[n] = { "BACK", nullptr }; ids[n++] = 13;
+    items[n] = { "EXIT", nullptr }; ids[n++] = 3;
+  }
   if (touchDown) settingsTouched = millis();
-  int r = obChoose(0, "SETTINGS", items, n);
+  int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : "SETTINGS 2/2", items, n);
   if (r >= 0) {
     settingsTouched = millis();
     switch (ids[r]) {
-      case 0: applyTheme(!darkMode); prefs.putBool("dark", darkMode); break;
-      case 1: profTone = (profTone + 1) % 3; prefs.putUChar("tone", profTone); break;
-      case 2: startOnboarding(); return;
-      case 3: obGo(OB_FINISHED); sayText("BYE, SETTINGS."); lastMotion = millis(); return;
-      case 4: obGo(OB_FINISHED); powerOff("GOODNIGHT."); return;
+      case 0:  applyTheme(!darkMode); prefs.putBool("dark", darkMode); break;
+      case 1:  profTone = (profTone + 1) % 3; prefs.putUChar("tone", profTone); break;
+      case 2:  startOnboarding(); return;
+      case 3:  obGo(OB_FINISHED); sayText("BYE, SETTINGS."); lastMotion = millis(); return;
+      case 4:  obGo(OB_FINISHED); powerOff("GOODNIGHT."); return;
+      case 10: obGo(OB_FINISHED); if (pomo) pomoStop(); else pomoStart(); lastMotion = millis(); return;
+      case 11: openClockSet(); return;
+      case 12: settingsPage = 1; obT0 = millis(); return;
+      case 13: settingsPage = 0; obT0 = millis(); return;
     }
   }
   if (millis() - settingsTouched > 10000) { obGo(OB_FINISHED); lastMotion = millis(); }
+}
+
+// Clock setting: top third = +, bottom third = -, hold to repeat, middle = next / save.
+int clkField = 0, clkH = 12, clkM = 0;
+uint32_t clkTouched = 0;
+void openClockSet() {
+  int h, m; if (localHM(h, m)) { clkH = h; clkM = m; }
+  clkField = 0; obGo(OB_CLOCK); tapEvent = false; clkTouched = millis();
+}
+void obClock() {
+  static uint32_t pressAt = 0, lastStep = 0; static int pressZone = 0; static bool wasDown = false;
+  drawBackground();
+  stepHeader("", "SET TIME");
+  const int zTop = H / 3, zBot = 2 * H / 3;
+  int zone = touchY < zTop ? 1 : touchY > zBot ? -1 : 0;
+  auto step = [&](int d) {
+    if (clkField == 0) clkH = (clkH + d + 24) % 24; else clkM = (clkM + d + 60) % 60;
+  };
+  if (touchDown && obT() > 300) {
+    clkTouched = millis();
+    if (!wasDown) { pressAt = millis(); pressZone = zone; lastStep = millis(); if (zone) step(zone); }
+    else if (pressZone && millis() - pressAt > 450 && millis() - lastStep > 90) { lastStep = millis(); step(pressZone); }
+  }
+  if (!touchDown && wasDown && pressZone == 0 && obT() > 300) {
+    if (clkField == 0) clkField = 1;
+    else {
+      time_t base = clockValid() ? (time(nullptr) / 86400) * 86400 : 1767225600L;   // keep today, else 2026-01-01
+      setClock(base + clkH * 3600 + clkM * 60);
+      obGo(OB_FINISHED); sayText("TIME IS SET."); lastMotion = millis();
+      wasDown = false; return;
+    }
+  }
+  wasDown = touchDown;
+  tapEvent = false;
+  // + / - zones
+  dotText("+", 99, W / 2, zTop / 2 - 10, 6, 2.5f, C_INK, 1, 0, W);
+  dotText("-", 99, W / 2, zBot + (H - zBot) / 2 - 30, 6, 2.5f, C_INK, 1, 0, W);
+  // big HH:MM, current field underlined in orange
+  char t[6]; snprintf(t, sizeof(t), "%02d:%02d", clkH, clkM);
+  const int p = 7, adv = 6 * p, x0 = W / 2 - (5 * adv - p) / 2, y0 = H / 2 - 28;
+  dotText(t, 99, W / 2, y0, p, 3.0f, C_INK, 1, 0, W);
+  int ux = clkField == 0 ? x0 : x0 + 3 * adv;
+  g->fillRect(ux, y0 + 7 * p + 8, 2 * adv - p, 4, C_ORANGE);
+  label(clkField == 0 ? "HOURS" : "MINUTES", W / 2, y0 - 26, C_INK, 1);
+  label(clkField == 0 ? "TAP MIDDLE: NEXT" : "TAP MIDDLE: SAVE", W / 2, y0 + 7 * p + 22, C_INK, 1);
+  if (millis() - clkTouched > 15000) obGo(OB_FINISHED);
 }
 
 void obTilt() {
@@ -1104,6 +1234,7 @@ void loop() {
   last = now;
 
   pollButton();
+  pollSerial();
   talkative = (ob == OB_FINISHED);
   behave(dt);
 
@@ -1129,16 +1260,28 @@ void loop() {
     case OB_TAP:       obTap(); break;
     case OB_DONE:      obDone(); break;
     case OB_SETTINGS:  obSettings(); break;
+    case OB_CLOCK:     obClock(); break;
     default:
       if (tripleTap) { tripleTap = false; openSettings(); break; }
       tapEvent = false;
       drawBackground();
       drawFace(now / 1000.0f);
       drawSpeech();
-      {   // tiny status: USB while plugged, battery % otherwise
+      {   // status row: clock or focus timer (left), power (right)
         char st[8];
         if (onUsb) snprintf(st, sizeof(st), chargeFull ? "FULL" : "USB"); else snprintf(st, sizeof(st), "%d%%", batteryPct());
         label(st, W - 16 - strlen(st) * 12, H - 28, onUsb ? C_ORANGE : C_INK);
+        char lt[16]; int h, m;
+        if (pomo) {
+          uint32_t left = (pomoLeft() + 999) / 1000;
+          snprintf(lt, sizeof(lt), "%s %02lu:%02lu", pomo == POMO_FOCUS ? "FOCUS" : "BREAK", (unsigned long)(left / 60), (unsigned long)(left % 60));
+          label(lt, 16, H - 28, C_ORANGE);
+          int bw = (int)((W - 32) * (float)pomoLeft() / pomoLen);     // shrinking progress bar
+          g->fillRect(16, H - 12, bw, 3, C_ORANGE);
+        } else if (localHM(h, m)) {
+          snprintf(lt, sizeof(lt), "%02d:%02d", h, m);
+          label(lt, 16, H - 28, C_INK);
+        }
       }
   }
   g->flush();
@@ -1146,8 +1289,8 @@ void loop() {
 
   if (now - lastLog > 500) {
     lastLog = now;
-    Serial.printf("usb=%d batV=%.2f mic=%s%.0fdB ob=%d dark=%d a=%.2f,%.2f,%.2f touch=%d(%d,%d) bat=%.2fV mood=%d sp=%d say=\"%s\" fps=%.0f\n",
-                  onUsb, batV, micOk ? "" : "off/", (float)micDb, ob, darkMode, ax, ay, az, touchDown, touchX, touchY, batteryV(), mood, special,
+    Serial.printf("t=%ld pomo=%d usb=%d batV=%.2f mic=%s%.0fdB ob=%d dark=%d a=%.2f,%.2f,%.2f touch=%d(%d,%d) bat=%.2fV mood=%d sp=%d say=\"%s\" fps=%.0f\n",
+                  clockValid() ? (long)(time(nullptr) % 86400) : -1L, pomo, onUsb, batV, micOk ? "" : "off/", (float)micDb, ob, darkMode, ax, ay, az, touchDown, touchX, touchY, batteryV(), mood, special,
                   speaking() ? speechText : "", 1.0f / dt);
   }
 }

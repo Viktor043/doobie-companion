@@ -109,6 +109,13 @@ static const char *const B_CHARGE[] = { "YUM. CHARGING.", "POWER SNACK!", "ENERG
 static const char *const B_UNPLUG[] = { "UNPLUGGED.", "ON MY OWN NOW.", "BATTERY MODE.", "BYE, CABLE." };
 static const char *const S_CHARGE[] = { "OOH, PLUGGED IN.", "THAT'S THE SPOT." };
 
+// time of day + pomodoro
+static const char *const B_MORNING[] = { "GOOD MORNING.", "COFFEE?", "RISE AND SHINE.", "NEW DAY!", "BREAKFAST TIME?", "SLEPT WELL?" };
+static const char *const B_NIGHT[]   = { "LATE, ISN'T IT?", "BEDTIME?", "NIGHT OWL.", "STARS ARE OUT.", "GO TO SLEEP.", "*YAWN* SO LATE." };
+static const char *const B_FOCUS[]   = { "BACK TO WORK.", "FOCUS TIME.", "LET'S GO. 25 MIN.", "HEADS DOWN." };
+static const char *const B_BREAK[]   = { "BREAK TIME!", "STRETCH!", "DRINK WATER.", "WELL DONE!", "5 MIN BREAK." };
+static const char *const B_SHH[]     = { "SHH. FOCUS.", "NOT NOW, WORKING.", "EYES ON THE TASK.", "LATER!" };
+
 // ------------------------------------------------------------ PET (REGULAR) -
 //  Regular tone: a pet with attitude. Cat/dog energy, zero flirting.
 static const char *const R_GREET[]  = { "OH. YOU.", "FINALLY. FOOD?", "HUMAN RETURNED.", "*TAIL WAG*", "WHERE WERE YOU?", "I GUESS HI." };
@@ -167,7 +174,7 @@ static const char *const S_QUIET[] = { "JUST US NOW...", "FINALLY ALONE.", "SO..
 enum Ev : uint8_t {
   EV_GREET, EV_TAP, EV_LOVE, EV_SHAKE, EV_BUMP, EV_DROP, EV_FLIP, EV_SLEEPY, EV_WAKE,
   EV_GRUMPY, EV_IDLE, EV_SUS, EV_ROLL, EV_CROSS, EV_WINK, EV_LOWBAT,
-  EV_QUIET, EV_TALK, EV_LOUD, EV_BANG, EV_PARTY, EV_CHARGE, EV_UNPLUG, EV_COUNT
+  EV_QUIET, EV_TALK, EV_LOUD, EV_BANG, EV_PARTY, EV_CHARGE, EV_MORNING, EV_NIGHT, EV_FOCUS, EV_BREAK, EV_SHH, EV_UNPLUG, EV_COUNT
 };
 struct EvPools { Pool base, pet, adult, spicy; };
 static const EvPools EVENTS[EV_COUNT] = {
@@ -193,6 +200,11 @@ static const EvPools EVENTS[EV_COUNT] = {
   /* BANG   */ { POOL(B_BANG),    NOPOOL,           NOPOOL,          NOPOOL },
   /* PARTY  */ { POOL(B_PARTY),   NOPOOL,           NOPOOL,          NOPOOL },
   /* CHARGE */ { POOL(B_CHARGE),  NOPOOL,           NOPOOL,          POOL(S_CHARGE) },
+  /* MORNING*/ { POOL(B_MORNING), NOPOOL,           NOPOOL,          NOPOOL },
+  /* NIGHT  */ { POOL(B_NIGHT),   NOPOOL,           NOPOOL,          NOPOOL },
+  /* FOCUS  */ { POOL(B_FOCUS),   NOPOOL,           NOPOOL,          NOPOOL },
+  /* BREAK  */ { POOL(B_BREAK),   NOPOOL,           NOPOOL,          NOPOOL },
+  /* SHH    */ { POOL(B_SHH),     NOPOOL,           NOPOOL,          NOPOOL },
   /* UNPLUG */ { POOL(B_UNPLUG),  NOPOOL,           NOPOOL,          NOPOOL },
 };
 static const Pool KID_IDLE = POOL(K_IDLE);
