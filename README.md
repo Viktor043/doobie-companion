@@ -59,7 +59,7 @@ arduino-cli upload  -b "$FQBN" -p /dev/cu.usbmodem* firmware/doobie
 | Cute | 18+, attitude: Cute | He: HANDSOME, TIGER… / She: GORGEOUS, QUEEN… / Skip: CUTIE, STAR… | Base, plus flirty adult lines ("OH, NICE FINGER.", "I LIKE THAT.") | "NICE TO MEET YOU, {N}." |
 | Spicy | 18+, attitude: Spicy | Same as Cute | Base, adult, plus cheeky innuendo ("BUY ME DINNER FIRST.", "UPSIDE DOWN? KINKY.") | "WELL HELLO, {N}. ;)" |
 
-There are about 400 lines across the pools. Change the vibe at any time in settings (triple-tap).
+There are about 400 reaction lines across the pools, plus 107 quotes and 223 history events. Change the attitude at any time in settings (4 taps).
 
 The age gate is self-declared. Under-18 profiles never draw from the adult or spicy pools (`pickPool()`). Spicy lines are innuendo, not explicit.
 
