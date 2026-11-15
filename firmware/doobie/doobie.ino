@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 0.6
+//  DOOBIE COMPANION, firmware 0.7
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -31,7 +31,7 @@
 #include "eyetypes.h"
 #include "phrases.h"
 
-#define FW_VERSION "0.6"
+#define FW_VERSION "0.7"
 
 void powerOff(const char *msg);
 extern OnbStep ob;
@@ -571,9 +571,15 @@ void drawFace(float t) {
 enum : uint8_t { POMO_OFF, POMO_FOCUS, POMO_BREAK };
 uint8_t pomo = POMO_OFF, pomoCount = 0;
 uint32_t pomoEnd = 0, pomoLen = 0;
-#define FOCUS_MS  (25UL * 60000UL)
-#define BREAK_MS  (5UL * 60000UL)
-#define LBREAK_MS (15UL * 60000UL)
+// user-adjustable in Settings > Focus (saved in NVS)
+const uint8_t FOCUS_OPTS[] = { 15, 20, 25, 30, 45, 50 };
+const uint8_t BREAK_OPTS[] = { 3, 5, 10 };
+const uint8_t LONG_OPTS[]  = { 10, 15, 20, 30 };
+uint8_t focusIdx = 2, breakIdx = 1, longIdx = 1;
+bool pomoAuto = true;                       // start the next focus after a break by itself
+#define FOCUS_MS  ((uint32_t)FOCUS_OPTS[focusIdx] * 60000UL)
+#define BREAK_MS  ((uint32_t)BREAK_OPTS[breakIdx] * 60000UL)
+#define LBREAK_MS ((uint32_t)LONG_OPTS[longIdx] * 60000UL)
 uint32_t pomoLeft() { return pomo ? (uint32_t)max(0L, (long)(pomoEnd - millis())) : 0; }
 
 // ============================================================================
@@ -676,8 +682,10 @@ void behave(float dt) {
       pomoCount++;
       pomo = POMO_BREAK; pomoLen = (pomoCount % 4 == 0) ? LBREAK_MS : BREAK_MS;
       setMood(HAPPY, 2500); blushT = 1; say(EV_BREAK);
-    } else {
+    } else if (pomoAuto) {
       pomo = POMO_FOCUS; pomoLen = FOCUS_MS; say(EV_FOCUS);
+    } else {
+      pomo = POMO_OFF; setMood(HAPPY, 1500); sayText("BREAK OVER. READY?");
     }
     pomoEnd = now + pomoLen;
     if (asleep) wake(NEUTRAL);
@@ -986,15 +994,17 @@ uint32_t settingsTouched = 0;
 int settingsPage = 0;
 void openSettings() { obGo(OB_SETTINGS); settingsPage = 0; settingsTouched = millis(); tapEvent = false; choicePicked = -1; speechText = nullptr; }
 void openClockSet();
-void pomoStart() { pomo = POMO_FOCUS; pomoLen = FOCUS_MS; pomoEnd = millis() + pomoLen; pomoCount = 0; setMood(FOCUS, 1500); sayText("FOCUS TIME. 25 MIN."); }
+char pomoMsg[24];
+void pomoStart() { pomo = POMO_FOCUS; pomoLen = FOCUS_MS; pomoEnd = millis() + pomoLen; pomoCount = 0; setMood(FOCUS, 1500);
+  snprintf(pomoMsg, sizeof(pomoMsg), "FOCUS TIME. %d MIN.", FOCUS_OPTS[focusIdx]); sayText(pomoMsg); }
 void pomoStop()  { pomo = POMO_OFF; sayText("FOCUS OFF. GOOD JOB."); }
 
 void obSettings() {
   static char modeTxt[16], toneTxt[16], clockTxt[16], focusTxt[16], brightTxt[16];
-  Choice items[6]; int n = 0, ids[6];
+  Choice items[7]; int n = 0, ids[7];
   if (settingsPage == 0) {
-    snprintf(focusTxt, sizeof(focusTxt), "%s", pomo ? "STOP FOCUS" : "FOCUS 25");
-    items[n] = { focusTxt, pomo ? "END THE POMODORO" : "25 MIN FOCUS, 5 BREAK" }; ids[n++] = 10;
+    snprintf(focusTxt, sizeof(focusTxt), "%s", pomo == POMO_FOCUS ? "FOCUS: ON" : pomo == POMO_BREAK ? "FOCUS: BRK" : "FOCUS...");
+    items[n] = { focusTxt, "POMODORO TIMER" }; ids[n++] = 15;
     int h, m;
     if (localHM(h, m)) snprintf(clockTxt, sizeof(clockTxt), "TIME %02d:%02d", h, m); else snprintf(clockTxt, sizeof(clockTxt), "SET TIME");
     items[n] = { clockTxt, "TAP TO SET THE CLOCK" }; ids[n++] = 11;
@@ -1002,6 +1012,17 @@ void obSettings() {
     items[n] = { modeTxt, "TAP TO SWITCH" }; ids[n++] = 0;
     if (profAdult) { snprintf(toneTxt, sizeof(toneTxt), "%s", TONE_NAME[profTone]); items[n] = { toneTxt, "TAP TO CHANGE VIBE" }; ids[n++] = 1; }
     items[n] = { "MORE...", nullptr }; ids[n++] = 12;
+  } else if (settingsPage == 2) {
+    static char fTxt[16], bTxt[16], lTxt[16];
+    snprintf(fTxt, sizeof(fTxt), "FOCUS %d", FOCUS_OPTS[focusIdx]);
+    snprintf(bTxt, sizeof(bTxt), "BREAK %d", BREAK_OPTS[breakIdx]);
+    snprintf(lTxt, sizeof(lTxt), "LONG %d", LONG_OPTS[longIdx]);
+    items[n] = { pomo ? "STOP" : "START", pomo ? "END THE POMODORO" : "BEGIN A FOCUS ROUND" }; ids[n++] = 10;
+    items[n] = { fTxt, "MINUTES OF FOCUS" }; ids[n++] = 20;
+    items[n] = { bTxt, "SHORT BREAK, MINUTES" }; ids[n++] = 21;
+    items[n] = { lTxt, "EVERY 4TH BREAK" }; ids[n++] = 22;
+    items[n] = { pomoAuto ? "AUTO ON" : "AUTO OFF", "NEXT ROUND STARTS ITSELF" }; ids[n++] = 23;
+    items[n] = { "BACK", nullptr }; ids[n++] = 13;
   } else {
     snprintf(brightTxt, sizeof(brightTxt), "BRIGHT %d", (brightIdx + 1) * 25);   // <=10 chars: one line
     items[n] = { brightTxt, "TAP: 25 / 50 / 75 / 100" }; ids[n++] = 14;
@@ -1011,7 +1032,7 @@ void obSettings() {
     items[n] = { "EXIT", nullptr }; ids[n++] = 3;
   }
   if (touchDown) settingsTouched = millis();
-  int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : "SETTINGS 2/2", items, n);
+  int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : settingsPage == 1 ? "SETTINGS 2/2" : "FOCUS", items, n);
   if (r >= 0) {
     settingsTouched = millis();
     switch (ids[r]) {
@@ -1024,6 +1045,11 @@ void obSettings() {
       case 11: openClockSet(); return;
       case 12: settingsPage = 1; obT0 = millis(); return;
       case 13: settingsPage = 0; obT0 = millis(); return;
+      case 15: settingsPage = 2; obT0 = millis(); return;
+      case 20: focusIdx = (focusIdx + 1) % sizeof(FOCUS_OPTS); prefs.putUChar("fmin", focusIdx); break;
+      case 21: breakIdx = (breakIdx + 1) % sizeof(BREAK_OPTS); prefs.putUChar("bmin", breakIdx); break;
+      case 22: longIdx = (longIdx + 1) % sizeof(LONG_OPTS); prefs.putUChar("lmin", longIdx); break;
+      case 23: pomoAuto = !pomoAuto; prefs.putBool("pauto", pomoAuto); break;
       case 14: brightIdx = (brightIdx + 1) % 4; prefs.putUChar("bright", brightIdx);
                brightness = brightTarget = userBright(); panel->setBrightness(brightness); break;
     }
@@ -1221,6 +1247,10 @@ void setup() {
   bool onboarded = prefs.getBool("onb", false) && prefs.isKey("adult");   // re-run if no profile yet
   applyTheme(prefs.getBool("dark", false));
   brightIdx = min((int)prefs.getUChar("bright", 3), 3);
+  focusIdx = min((int)prefs.getUChar("fmin", 2), (int)sizeof(FOCUS_OPTS) - 1);
+  breakIdx = min((int)prefs.getUChar("bmin", 1), (int)sizeof(BREAK_OPTS) - 1);
+  longIdx  = min((int)prefs.getUChar("lmin", 1), (int)sizeof(LONG_OPTS) - 1);
+  pomoAuto = prefs.getBool("pauto", true);
   brightness = brightTarget = userBright(); panel->setBrightness(brightness);
   profSex = prefs.getUChar("sex", 2); profAdult = prefs.getBool("adult", false);
   // 0.3 stored a "spicy" bool; map it: spicy -> 2, otherwise flirty (what 0.3 adults got)
