@@ -1501,6 +1501,9 @@ void setup() {
   randomSeed(esp_random());
   lastMotion = millis();
 
+  Serial.printf("MEM internal free %u KB (largest %u KB), PSRAM free %u / %u KB\n",
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024,
+                ESP.getFreePsram() / 1024, ESP.getPsramSize() / 1024);
   if (!onboarded) startOnboarding();
   else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) { rtc_gpio_deinit(GPIO_NUM_0); pinMode(PIN_BOOT, INPUT_PULLUP); sayText("I'M BACK!"); }
   else { say(EV_GREET); }
