@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.1
+//  DOOBIE COMPANION, firmware 1.2
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -33,7 +33,7 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.1"
+#define FW_VERSION "1.2"
 
 void powerOff(const char *msg);
 extern OnbStep ob;
@@ -429,7 +429,7 @@ uint16_t recent[8]; uint8_t recentHead = 0;  // recently used lines (pointer has
 uint8_t speechKind = 0;          // 0 normal line, 1 quote card, 2 event card
 char speechSub[40];               // card attribution / date line
 uint32_t speechDuration(const char *s) {
-  if (speechKind) return min(14000UL, (unsigned long)(strlen(s) * 60 + 3200));   // cards: time to read
+  if (speechKind) return min(16000UL, (unsigned long)(strlen(s) * 70 + 4000));   // cards: time to read
   return strlen(s) * 38 + 1700 + 380;
 }
 bool speaking() { return speechText && millis() - speechStart < speechDuration(speechText); }
@@ -440,9 +440,9 @@ bool profAdult = false;         // under-18 profiles never see ADULT/SPICY lines
 // Attitude: 0 pet, 1 cute (flirty), 2 spicy, 3 quotes, 4 events,
 //           5 bossy, 6 exquisite (Victorian), 7 balkan. Kids: everything but 1 and 2.
 uint8_t profTone = 0;
-#define profSpicy (profAdult && profTone == 2)
-#define profFlirt (profAdult && (profTone == 1 || profTone == 2))
-const char *const TONE_NAME[8] = { "PET", "CUTE", "SPICY", "QUOTES", "EVENTS", "BOSSY", "EXQUISITE", "BALKAN" };
+#define profSpicy false                 // spicy removed in 1.2: kid-friendly
+#define profFlirt (profAdult && profTone == 1)
+const char *const TONE_NAME[8] = { "PET", "CUTE", "-", "QUOTES", "EVENTS", "BOSSY", "REFINED", "BALKAN" };   // 2 = retired (spicy)
 #define TONE_COUNT 8
 char speechBuf[128];             // quotes run up to ~90 chars
 
@@ -478,7 +478,6 @@ const Pool *pickPool(Ev e) {
     if (P.pet.n && roll >= 55) return &P.pet;
     return &P.base;
   }
-  if (profSpicy && P.spicy.n && roll < 40) return &P.spicy;
   if (profFlirt && P.adult.n && roll >= 40 && roll < 70) return &P.adult;
   if (P.pet.n && roll >= (profFlirt ? 85 : 50)) return &P.pet;
   return &P.base;
@@ -545,9 +544,9 @@ void say(Ev e, bool force = true) {
   }
   recent[recentHead++ & 7] = (uint16_t)((uintptr_t)L->items[idx] >> 2);
   // QUOTES / EVENTS attitudes: most idle remarks become cards
-  if (e == EV_IDLE && (profTone == 3 || profTone == 4) && random(100) < 70) {
+  if (e == EV_IDLE && (profTone == 3 || profTone == 4)) {          // card modes: every idle remark is a card
     if (profTone == 3) sayQuote(); else sayEvent();
-    nextIdleTalk = speechEndsAt + random(28000, 69000);
+    nextIdleTalk = speechEndsAt + random(20000, 45000);
     return;
   }
   sayText(L->items[idx]);
@@ -560,14 +559,24 @@ void drawSpeech() {
   int len = strlen(speechText);
   int visible = min(len, (int)(t / 38) + 1);
   float dissolve = t > total - 380 ? (t - (total - 380)) / 380.0f : 0;
-  if (speechKind) {                                  // quote / event card
-    int lines = textLines(speechText, 2, W - 36);
-    int vis = min(len, (int)(t / 20) + 1);
+  if (speechKind) {                                  // quote / event card: top two thirds, big type
+    const int maxW = W - 32, top = 28, avail = 300 - top;
+    const int subP = strlen(speechSub) <= 13 ? 3 : 2;            // event date / attribution
+    const int subH = textHeight(textLines(speechSub, subP, maxW), subP) + 14;
+    int p = 4;                                                   // biggest pitch that fits
+    while (p > 2 && textHeight(textLines(speechText, p, maxW), p) + subH > avail) p--;
+    float rr = p == 4 ? 1.7f : p == 3 ? 1.3f : 1.0f;
+    int th = textHeight(textLines(speechText, p, maxW), p);
+    int y0 = top + max(0, (avail - th - subH) / 2);              // centred in the top area
+    int vis = min(len, (int)(t / 24) + 1);
     float dis = t > total - 380 ? (t - (total - 380)) / 380.0f : 0;
-    if (speechKind == 2) dotText(speechSub, 99, W / 2, 34, 2, 1.0f, C_ORANGE, 1, dis, W - 36);
-    int ty = speechKind == 2 ? 58 : 36;
-    dotText(speechText, vis, W / 2, ty, 2, 1.0f, C_INK, 1, dis, W - 36);
-    if (speechKind == 1 && vis >= len) dotText(speechSub, 99, W / 2, ty + textHeight(lines, 2) + 10, 2, 1.0f, C_ORANGE, 1, dis, W - 36);
+    if (speechKind == 2) {                                       // date above the event
+      dotText(speechSub, 99, W / 2, y0, subP, subP == 3 ? 1.3f : 1.0f, C_ORANGE, 1, dis, maxW);
+      y0 += subH;
+    }
+    dotText(speechText, vis, W / 2, y0, p, rr, C_INK, 1, dis, maxW);
+    if (speechKind == 1 && vis >= len)                           // attribution under the quote
+      dotText(speechSub, 99, W / 2, y0 + th + 14, subP, subP == 3 ? 1.3f : 1.0f, C_ORANGE, 1, dis, maxW);
     return;
   }
   int pitch = textLines(speechText, 4, W - 40) <= 2 ? 4 : 3;
@@ -659,12 +668,20 @@ void drawBackground() {
   memcpy(g->getFramebuffer(), bgFrames[gf], W * H * 2);
 }
 
+float cardMix = 0;          // 0 = normal face, 1 = card layout (eyes small, bottom third)
 void drawFace(float t) {
-  const float cx = W / 2, cy = H / 2 + 22, sep = 66;
-  float bob = sinf(t * 1.7f) * 3.0f - audioPulse * 12.0f, cv = converge * 0.6f;
-  float lx = cx - sep + gazeX * GAZE_KX + cv, rx = cx + sep + gazeX * GAZE_KX - cv;
-  float gy = gazeY * GAZE_KY;
-  if (speechText) gy = fmaxf(gy, -24.0f);       // breathing room under the speech
+  static uint32_t lastMs = millis();
+  float dtf = constrain((millis() - lastMs) / 1000.0f, 0.001f, 0.05f); lastMs = millis();
+  const bool card = speechText && speechKind;
+  cardMix = approach(cardMix, card ? 1.0f : 0.0f, 6, dtf);
+  const float k = cardMix, fs = 1.0f - 0.58f * k;              // feature scale: ~42% while a card shows
+  const float sc = SCALE * fs;
+  const float cx = W / 2, cy = (H / 2 + 22) * (1 - k) + 384 * k, sep = 66 * (1 - k) + 34 * k;
+  float bob = (sinf(t * 1.7f) * 3.0f - audioPulse * 12.0f) * (1 - 0.6f * k), cv = converge * 0.6f * (1 - k);
+  const float gk = 1 - 0.75f * k;                               // less gaze travel when small
+  float lx = cx - sep + gazeX * GAZE_KX * gk + cv, rx = cx + sep + gazeX * GAZE_KX * gk - cv;
+  float gy = gazeY * GAZE_KY * gk;
+  if (speechText && !card) gy = fmaxf(gy, -24.0f);   // breathing room under normal speech
   float ly = cy + gy + bob, ry = ly;
   float sqL = 1 - eyeOpen, sqR = 1 - eyeOpen;
   if (blinkT >= 0) {
@@ -674,24 +691,24 @@ void drawFace(float t) {
   }
   if (special == SP_LOVE) {
     float p = 1.0f + 0.12f * sinf(t * 10.0f);
-    drawHeart(lx, ly, 40 * p, C_RED); drawHeart(rx, ry, 40 * p, C_RED);
+    drawHeart(lx, ly, 40 * p * fs, C_RED); drawHeart(rx, ry, 40 * p * fs, C_RED);
   } else if (special == SP_DIZZY) {
-    drawSpiral(lx, ly, t, 46); drawSpiral(rx, ry, -t, 46);
+    drawSpiral(lx, ly, t, 46 * fs); drawSpiral(rx, ry, -t, 46 * fs);
   } else if (special == SP_ASLEEP) {
-    dotField(lx, ly, 44, 8, C_INK, [](float x, float y) { return sdBox(x, y, 40, 4, 4); });
-    dotField(rx, ry, 44, 8, C_INK, [](float x, float y) { return sdBox(x, y, 40, 4, 4); });
+    dotField(lx, ly, 44 * fs, 8, C_INK, [&](float x, float y) { return sdBox(x, y, 40 * fs, 4, 4); });
+    dotField(rx, ry, 44 * fs, 8, C_INK, [&](float x, float y) { return sdBox(x, y, 40 * fs, 4, 4); });
     for (float off : {0.0f, 0.5f}) {
       float zt = fmodf(t * 0.6f + off, 1.0f);
       if (zt < 0.85f) drawZ(rx + 20 + zt * 30, ry - 40 - zt * 90, 2 + (int)(zt * 4));
     }
   } else {
-    drawEye(lx, ly, curL, sqL, true);
-    drawEye(rx, ry, curR, sqR, false);
+    drawEye(lx, ly, curL, sqL, true, sc);
+    drawEye(rx, ry, curR, sqR, false, sc);
   }
   if (blush > 0.05f) {
-    float ry2 = 12 * blush, rx2 = 30 * blush;
-    dotField(lx - 8, ly + 82, rx2 + 4, ry2 + 4, C_PINK, [&](float x, float y) { return sdEllipse(x, y, rx2, ry2); });
-    dotField(rx + 8, ry + 82, rx2 + 4, ry2 + 4, C_PINK, [&](float x, float y) { return sdEllipse(x, y, rx2, ry2); });
+    float ry2 = 12 * blush * fs, rx2 = 30 * blush * fs;
+    dotField(lx - 8 * fs, ly + 82 * fs, rx2 + 4, ry2 + 4, C_PINK, [&](float x, float y) { return sdEllipse(x, y, rx2, ry2); });
+    dotField(rx + 8 * fs, ry + 82 * fs, rx2 + 4, ry2 + 4, C_PINK, [&](float x, float y) { return sdEllipse(x, y, rx2, ry2); });
   }
 }
 
@@ -777,7 +794,8 @@ void behave(float dt) {
   // drowsiness
   if (pomo != POMO_OFF) lastMotion = now;            // stay awake through a pomodoro
   uint32_t still = now - lastMotion;
-  const uint32_t sleepyAt = isNight() ? 10000 : 20000, asleepAt = isNight() ? 25000 : 45000;
+  const uint32_t awakeK = (profTone == 3 || profTone == 4) ? 4 : 1;   // card modes stay up ~4x longer
+  const uint32_t sleepyAt = (isNight() ? 10000 : 20000) * awakeK, asleepAt = (isNight() ? 25000 : 45000) * awakeK;
   if (!asleep && still > asleepAt) { asleep = true; asleepSince = now; special = SP_ASLEEP; specialUntil = UINT32_MAX; speechText = nullptr; }
   else if (!asleep && still > sleepyAt && baseMood == NEUTRAL) { baseMood = SLEEPY; if (talkative) say(EV_SLEEPY); }
   else if (still < sleepyAt && baseMood == SLEEPY) baseMood = NEUTRAL;
@@ -1098,7 +1116,7 @@ int obChoose(int stepN, const char *title, const Choice *c, int n) {
 const Choice CH_SEX[]   = { {"HE", "HIM / MALE"}, {"SHE", "HER / FEMALE"}, {"SKIP", "RATHER NOT SAY"} };
 const Choice CH_AGE[]   = { {"UNDER 18", "KID MODE"}, {"18+", "GROWN-UP MODE"} };
 // Onboarding attitude: everyone-friendly characters. Cute/Spicy live in settings behind an 18+ confirm.
-const Choice CH_TONE[]  = { {"PET", "CAT AND DOG ENERGY"}, {"BOSSY", "CEO WITH A STOPWATCH"}, {"EXQUISITE", "VICTORIAN MANNERS"}, {"BALKAN", "AJDE, NO STRESS"} };
+const Choice CH_TONE[]  = { {"PET", "CAT AND DOG ENERGY"}, {"BOSSY", "CEO WITH A STOPWATCH"}, {"REFINED", "VICTORIAN MANNERS"}, {"BALKAN", "AJDE, NO STRESS"} };
 const uint8_t CH_TONE_ID[4] = { 0, 5, 6, 7 };
 
 void obSex() {
@@ -1148,12 +1166,12 @@ void obSettings() {
     items[n] = { toneTxt, "PET, CUTE, SPICY, QUOTES, EVENTS" }; ids[n++] = 17;
     items[n] = { "MORE...", nullptr }; ids[n++] = 12;
   } else if (settingsPage == 6) {                   // 18+ confirm for Cute / Spicy
-    items[n] = { "I'M 18+", "UNLOCKS CUTE AND SPICY" }; ids[n++] = 50;
+    items[n] = { "I'M 18+", "UNLOCKS CUTE (FLIRTY)" }; ids[n++] = 50;
     items[n] = { "CANCEL", nullptr }; ids[n++] = 51;
   } else if (settingsPage == 4 || settingsPage == 5) {
     static char aTxt[TONE_COUNT][16];
     int allowed[TONE_COUNT], na = 0;
-    for (int i = 0; i < TONE_COUNT; i++) allowed[na++] = i;
+    for (int i = 0; i < TONE_COUNT; i++) if (i != 2) allowed[na++] = i;   // 2 = retired spicy
     int from = settingsPage == 4 ? 0 : 4, to = settingsPage == 4 ? min(4, na) : na;
     for (int k = from; k < to; k++) {
       int i = allowed[k];
@@ -1212,7 +1230,7 @@ void obSettings() {
                obGo(OB_FINISHED); lastMotion = millis(); say(EV_GREET); return;
       case 51: settingsPage = 4; obT0 = millis(); return;
       case 40: case 41: case 42: case 43: case 44: case 45: case 46: case 47:
-        if ((ids[r] == 41 || ids[r] == 42) && !profAdult) { pendingTone = ids[r] - 40; settingsPage = 6; obT0 = millis(); return; }
+        if (ids[r] == 41 && !profAdult) { pendingTone = ids[r] - 40; settingsPage = 6; obT0 = millis(); return; }
         profTone = ids[r] - 40; prefs.putUChar("tone", profTone);
         if ((profTone == 3 || profTone == 4)) {                                    // show a sample straight away
           obGo(OB_FINISHED); lastMotion = millis();
@@ -1523,8 +1541,8 @@ void setup() {
   // 0.3 stored a "spicy" bool; map it: spicy -> 2, otherwise flirty (what 0.3 adults got)
   if (prefs.isKey("tone")) profTone = prefs.getUChar("tone", 0);
   else profTone = prefs.getBool("spicy", false) ? 2 : (profAdult ? 1 : 0);
-  if (profTone >= TONE_COUNT) profTone = 0;
-  if (!profAdult && (profTone == 1 || profTone == 2)) profTone = 0;   // needs the 18+ confirm
+  if (profTone >= TONE_COUNT || profTone == 2) profTone = 0;   // spicy retired
+  if (!profAdult && profTone == 1) profTone = 0;   // Cute needs the 18+ confirm
   Serial.printf("Profile: sex=%d adult=%d tone=%s\n", profSex, profAdult, TONE_NAME[profTone]);
   curL = curR = moodShape(NEUTRAL, true);
   randomSeed(esp_random());
@@ -1536,6 +1554,7 @@ void setup() {
   if (!onboarded) startOnboarding();
   else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) { rtc_gpio_deinit(GPIO_NUM_0); pinMode(PIN_BOOT, INPUT_PULLUP); sayText("I'M BACK!"); }
   else { say(EV_GREET); }
+  if (profTone == 3 || profTone == 4) nextIdleTalk = millis() + 15000;
 }
 
 void loop() {

@@ -3,7 +3,7 @@
 //  Doobie's vocabulary: dot-matrix snippets grouped by trigger, in three tiers
 //    BASE   everyone (all ages)
 //    ADULT  18+ profiles: flirty, pet names
-//    SPICY  18+ AND opted in during onboarding: cheeky innuendo
+//    (SPICY tier removed in firmware 1.2: Doobie is kid-friendly)
 //    PET    Regular tone: pet attitude, no flirting (also mixed in for kids)
 //  Kids get BASE plus the KID pool. Nothing from ADULT/SPICY is ever picked
 //  for an under-18 profile (see pickPool() in doobie.ino).
@@ -107,7 +107,6 @@ static const char *const B_PARTY[] = { "PARTY?!", "IS THAT MUSIC?", "DANCE WITH 
 // power (USB plug / unplug)
 static const char *const B_CHARGE[] = { "YUM. CHARGING.", "POWER SNACK!", "ENERGY IN.", "MMM, ELECTRONS.", "THANKS FOR THE JUICE." };
 static const char *const B_UNPLUG[] = { "UNPLUGGED.", "ON MY OWN NOW.", "BATTERY MODE.", "BYE, CABLE." };
-static const char *const S_CHARGE[] = { "OOH, PLUGGED IN.", "THAT'S THE SPOT." };
 
 // time of day + pomodoro
 static const char *const B_MORNING[] = { "GOOD MORNING.", "COFFEE?", "RISE AND SHINE.", "NEW DAY!", "BREAKFAST TIME?", "SLEPT WELL?" };
@@ -151,24 +150,6 @@ static const char *const A_IDLE[]  = { "CUTE OUTFIT.", "YOU LOOK GOOD.", "OUR SE
 static const char *const A_WINK[]  = { "HEY, {N}.", "HI THERE, {N}.", "OUR LITTLE SECRET.", "CALL ME ;)" };
 
 // ---------------------------------------------------------------- SPICY -----
-static const char *const S_TAP[]   = {
-  "RIGHT THERE.", "SLOWER...", "GENTLY...", "TOUCH ME AGAIN.", "YOU'RE TROUBLE.",
-  "NAUGHTY.", "TEASE.", "BUY ME DINNER FIRST.", "I'M BLUSHING.", "FIRM. I LIKE IT.",
-};
-static const char *const S_LOVE[]  = {
-  "DON'T YOU DARE STOP.", "IS IT HOT IN HERE?", "WHAT A HANDFUL.", "GET A ROOM? OK.",
-  "MORE, {N}.", "YOU HAD ME AT TAP.",
-};
-static const char *const S_SHAKE[] = { "SHAKE IT, BABY.", "ROUGH. I SEE.", "EASY, TIGER.", "WILD ONE, HUH?" };
-static const char *const S_BUMP[]  = { "OOH, ROUGH.", "OOH, FEISTY.", "CAREFUL, {N}.", "I BRUISE EASY." };
-static const char *const S_FLIP[]  = { "UPSIDE DOWN? KINKY.", "NEW POSITION?", "OH, WE'RE DOING THIS?" };
-static const char *const S_IDLE[]  = {
-  "BEHAVE.", "NOT IN PUBLIC!", "WANNA GET OUT OF HERE?", "YOUR PLACE OR MINE?",
-  "I'VE BEEN BAD.", "WINK WINK.", "NICE VIEW FROM HERE.", "TAKE IT SLOW.",
-  "SAY MY NAME.", "LATER, {N}. ;)",
-};
-static const char *const S_LOUD[]  = { "KEEP IT DOWN, TIGER.", "SCREAMER, HUH?", "OOH, LOUD ONE." };
-static const char *const S_QUIET[] = { "JUST US NOW...", "FINALLY ALONE.", "SO... HI ;)" };
 
 // ---------------------------------------------------------------- EVENTS ----
 enum Ev : uint8_t {
@@ -179,27 +160,27 @@ enum Ev : uint8_t {
 struct EvPools { Pool base, pet, adult, spicy; };
 static const EvPools EVENTS[EV_COUNT] = {
   /* GREET  */ { POOL(B_GREET),   POOL(R_GREET),    POOL(A_GREET),   NOPOOL },
-  /* TAP    */ { POOL(B_TAP),     POOL(R_TAP),      POOL(A_TAP),     POOL(S_TAP) },
-  /* LOVE   */ { POOL(B_LOVE),    POOL(R_LOVE),     POOL(A_LOVE),    POOL(S_LOVE) },
-  /* SHAKE  */ { POOL(B_SHAKE),   POOL(R_SHAKE),    NOPOOL,          POOL(S_SHAKE) },
-  /* BUMP   */ { POOL(B_BUMP),    POOL(R_BUMP),     NOPOOL,          POOL(S_BUMP) },
+  /* TAP    */ { POOL(B_TAP),     POOL(R_TAP),      POOL(A_TAP),     NOPOOL },
+  /* LOVE   */ { POOL(B_LOVE),    POOL(R_LOVE),     POOL(A_LOVE),    NOPOOL },
+  /* SHAKE  */ { POOL(B_SHAKE),   POOL(R_SHAKE),    NOPOOL,          NOPOOL },
+  /* BUMP   */ { POOL(B_BUMP),    POOL(R_BUMP),     NOPOOL,          NOPOOL },
   /* DROP   */ { POOL(B_DROP),    NOPOOL,           NOPOOL,          NOPOOL },
-  /* FLIP   */ { POOL(B_FLIP),    POOL(R_FLIP),     NOPOOL,          POOL(S_FLIP) },
+  /* FLIP   */ { POOL(B_FLIP),    POOL(R_FLIP),     NOPOOL,          NOPOOL },
   /* SLEEPY */ { POOL(B_SLEEPY),  POOL(R_SLEEPY),   NOPOOL,          NOPOOL },
   /* WAKE   */ { POOL(B_WAKE),    POOL(R_WAKE),     NOPOOL,          NOPOOL },
   /* GRUMPY */ { POOL(B_GRUMPY),  NOPOOL,           NOPOOL,          NOPOOL },
-  /* IDLE   */ { POOL(B_IDLE),    POOL(R_IDLE),     POOL(A_IDLE),    POOL(S_IDLE) },
+  /* IDLE   */ { POOL(B_IDLE),    POOL(R_IDLE),     POOL(A_IDLE),    NOPOOL },
   /* SUS    */ { POOL(B_SUS),     NOPOOL,           NOPOOL,          NOPOOL },
   /* ROLL   */ { POOL(B_ROLL),    NOPOOL,           NOPOOL,          NOPOOL },
   /* CROSS  */ { POOL(B_CROSS),   NOPOOL,           NOPOOL,          NOPOOL },
   /* WINK   */ { POOL(B_WINK),    NOPOOL,           POOL(A_WINK),    NOPOOL },
   /* LOWBAT */ { POOL(B_LOWBAT),  POOL(R_LOWBAT),   NOPOOL,          NOPOOL },
-  /* QUIET  */ { POOL(B_QUIET),   NOPOOL,           NOPOOL,          POOL(S_QUIET) },
+  /* QUIET  */ { POOL(B_QUIET),   NOPOOL,           NOPOOL,          NOPOOL },
   /* TALK   */ { POOL(B_TALK),    NOPOOL,           NOPOOL,          NOPOOL },
-  /* LOUD   */ { POOL(B_LOUD),    NOPOOL,           NOPOOL,          POOL(S_LOUD) },
+  /* LOUD   */ { POOL(B_LOUD),    NOPOOL,           NOPOOL,          NOPOOL },
   /* BANG   */ { POOL(B_BANG),    NOPOOL,           NOPOOL,          NOPOOL },
   /* PARTY  */ { POOL(B_PARTY),   NOPOOL,           NOPOOL,          NOPOOL },
-  /* CHARGE */ { POOL(B_CHARGE),  NOPOOL,           NOPOOL,          POOL(S_CHARGE) },
+  /* CHARGE */ { POOL(B_CHARGE),  NOPOOL,           NOPOOL,          NOPOOL },
   /* MORNING*/ { POOL(B_MORNING), NOPOOL,           NOPOOL,          NOPOOL },
   /* NIGHT  */ { POOL(B_NIGHT),   NOPOOL,           NOPOOL,          NOPOOL },
   /* FOCUS  */ { POOL(B_FOCUS),   NOPOOL,           NOPOOL,          NOPOOL },
