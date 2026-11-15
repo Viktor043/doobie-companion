@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 0.5
+//  DOOBIE COMPANION, firmware 0.6
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -31,7 +31,7 @@
 #include "eyetypes.h"
 #include "phrases.h"
 
-#define FW_VERSION "0.5"
+#define FW_VERSION "0.6"
 
 void powerOff(const char *msg);
 extern OnbStep ob;
@@ -586,6 +586,10 @@ uint32_t asleepSince = 0;
 bool tapEvent = false;            // consumed by onboarding
 bool tripleTap = false;           // 4-tap gesture: opens settings
 uint8_t brightness = 255, brightTarget = 255;
+// user brightness: 25 / 50 / 75 / 100 %
+const uint8_t BRIGHT_LEVELS[4] = { 64, 128, 191, 255 };
+uint8_t brightIdx = 3;
+uint8_t userBright() { return BRIGHT_LEVELS[brightIdx]; }
 
 void wake(Mood m) {
   if (asleep) { asleep = false; special = SP_NONE; setMood(m, 1500); if (talkative) say(m == ANGRY ? EV_GRUMPY : EV_WAKE); }
@@ -641,7 +645,7 @@ void behave(float dt) {
   if (!asleep && still > asleepAt) { asleep = true; asleepSince = now; special = SP_ASLEEP; specialUntil = UINT32_MAX; speechText = nullptr; }
   else if (!asleep && still > sleepyAt && baseMood == NEUTRAL) { baseMood = SLEEPY; if (talkative) say(EV_SLEEPY); }
   else if (still < sleepyAt && baseMood == SLEEPY) baseMood = NEUTRAL;
-  brightTarget = asleep ? 40 : 255;
+  brightTarget = asleep ? max(12, userBright() / 6) : userBright();
 
   static uint32_t nextBat = 0; static bool firstBat = true;
   if (now > nextBat) {
@@ -986,8 +990,8 @@ void pomoStart() { pomo = POMO_FOCUS; pomoLen = FOCUS_MS; pomoEnd = millis() + p
 void pomoStop()  { pomo = POMO_OFF; sayText("FOCUS OFF. GOOD JOB."); }
 
 void obSettings() {
-  static char modeTxt[16], toneTxt[16], clockTxt[16], focusTxt[16];
-  Choice items[5]; int n = 0, ids[5];
+  static char modeTxt[16], toneTxt[16], clockTxt[16], focusTxt[16], brightTxt[16];
+  Choice items[6]; int n = 0, ids[6];
   if (settingsPage == 0) {
     snprintf(focusTxt, sizeof(focusTxt), "%s", pomo ? "STOP FOCUS" : "FOCUS 25");
     items[n] = { focusTxt, pomo ? "END THE POMODORO" : "25 MIN FOCUS, 5 BREAK" }; ids[n++] = 10;
@@ -996,6 +1000,8 @@ void obSettings() {
     items[n] = { clockTxt, "TAP TO SET THE CLOCK" }; ids[n++] = 11;
     snprintf(modeTxt, sizeof(modeTxt), "%s", darkMode ? "DARK MODE" : "LIGHT MODE");
     items[n] = { modeTxt, "TAP TO SWITCH" }; ids[n++] = 0;
+    snprintf(brightTxt, sizeof(brightTxt), "BRIGHT %d", (brightIdx + 1) * 25);   // <=10 chars: one line
+    items[n] = { brightTxt, "TAP: 25 / 50 / 75 / 100" }; ids[n++] = 14;
     if (profAdult) { snprintf(toneTxt, sizeof(toneTxt), "%s", TONE_NAME[profTone]); items[n] = { toneTxt, "TAP TO CHANGE VIBE" }; ids[n++] = 1; }
     items[n] = { "MORE...", nullptr }; ids[n++] = 12;
   } else {
@@ -1018,6 +1024,8 @@ void obSettings() {
       case 11: openClockSet(); return;
       case 12: settingsPage = 1; obT0 = millis(); return;
       case 13: settingsPage = 0; obT0 = millis(); return;
+      case 14: brightIdx = (brightIdx + 1) % 4; prefs.putUChar("bright", brightIdx);
+               brightness = brightTarget = userBright(); panel->setBrightness(brightness); break;
     }
   }
   if (millis() - settingsTouched > 10000) { obGo(OB_FINISHED); lastMotion = millis(); }
@@ -1115,7 +1123,7 @@ void obDone() {
 
 void startOnboarding() {
   talkative = false; asleep = false; special = SP_NONE; speechText = nullptr;
-  brightTarget = 255; panel->setBrightness(255); brightness = 255;
+  brightTarget = userBright(); panel->setBrightness(userBright()); brightness = userBright();
   obGo(OB_BOOT);
 }
 
@@ -1145,7 +1153,7 @@ void pollButton() {
 void powerOff(const char *msg) {
   Serial.println("power off");
   special = SP_NONE; asleep = false; blinkT = -1; mood = baseMood = SLEEPY; moodUntil = 0;
-  panel->setBrightness(255);
+  panel->setBrightness(userBright());
   sayText(msg);
   uint32_t t0 = millis(), last = t0;
   while (millis() - t0 < 2200) {               // eyes droop shut while it says goodbye
@@ -1161,7 +1169,7 @@ void powerOff(const char *msg) {
     g->fillRoundRect(W / 2 - w / 2, H / 2 - h / 2, w, h, h / 2, C_INK);
     g->flush(); delay(16);
   }
-  for (int b = 255; b > 0; b -= 32) { panel->setBrightness(b); delay(12); }
+  for (int b = userBright(); b > 0; b -= 32) { panel->setBrightness(b); delay(12); }
   panel->setBrightness(0);
   panel->displayOff();                         // DISPOFF + SLPIN
   i2cWrite(ADDR_TOUCH, 0x86, 0x01);            // touch: auto-drop to monitor mode
@@ -1212,6 +1220,8 @@ void setup() {
   prefs.begin("doobie", false);
   bool onboarded = prefs.getBool("onb", false) && prefs.isKey("adult");   // re-run if no profile yet
   applyTheme(prefs.getBool("dark", false));
+  brightIdx = min((int)prefs.getUChar("bright", 3), 3);
+  brightness = brightTarget = userBright(); panel->setBrightness(brightness);
   profSex = prefs.getUChar("sex", 2); profAdult = prefs.getBool("adult", false);
   // 0.3 stored a "spicy" bool; map it: spicy -> 2, otherwise flirty (what 0.3 adults got)
   if (prefs.isKey("tone")) profTone = prefs.getUChar("tone", 0);
