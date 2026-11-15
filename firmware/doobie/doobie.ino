@@ -1000,11 +1000,11 @@ void obSettings() {
     items[n] = { clockTxt, "TAP TO SET THE CLOCK" }; ids[n++] = 11;
     snprintf(modeTxt, sizeof(modeTxt), "%s", darkMode ? "DARK MODE" : "LIGHT MODE");
     items[n] = { modeTxt, "TAP TO SWITCH" }; ids[n++] = 0;
-    snprintf(brightTxt, sizeof(brightTxt), "BRIGHT %d", (brightIdx + 1) * 25);   // <=10 chars: one line
-    items[n] = { brightTxt, "TAP: 25 / 50 / 75 / 100" }; ids[n++] = 14;
     if (profAdult) { snprintf(toneTxt, sizeof(toneTxt), "%s", TONE_NAME[profTone]); items[n] = { toneTxt, "TAP TO CHANGE VIBE" }; ids[n++] = 1; }
     items[n] = { "MORE...", nullptr }; ids[n++] = 12;
   } else {
+    snprintf(brightTxt, sizeof(brightTxt), "BRIGHT %d", (brightIdx + 1) * 25);   // <=10 chars: one line
+    items[n] = { brightTxt, "TAP: 25 / 50 / 75 / 100" }; ids[n++] = 14;
     items[n] = { "PROFILE", "REDO ONBOARDING" }; ids[n++] = 2;
     items[n] = { "POWER OFF", "BOOT WAKES IT" }; ids[n++] = 4;
     items[n] = { "BACK", nullptr }; ids[n++] = 13;
