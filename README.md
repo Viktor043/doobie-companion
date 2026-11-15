@@ -45,23 +45,22 @@ arduino-cli upload  -b "$FQBN" -p /dev/cu.usbmodem* firmware/doobie
 | Hold | Hearts |
 | Leave it still for 20 s / 45 s | Sleepy / asleep (dims) |
 
-- **Profile questions** during onboarding: *he / she / skip*, then *under 18 / 18+*. Adults then pick an attitude: *Pet*, *Cute* or *Spicy*. Quotes and Events can be chosen later in settings.
+- **Profile questions** during onboarding: *he / she / skip*, then an attitude: *Pet*, *Bossy*, *Exquisite* or *Balkan*. There's no age question. Cute and Spicy are only in settings, behind a one-time **I'M 18+** confirmation. Redoing onboarding locks them again.
 - **Speech:** about 400 short lines (`phrases.h`), typed out in a 5x7 dot font and dissolved away. Lines come in tiers (base, kid, pet, adult, spicy), and `{N}` is swapped for a pet name that suits the profile. It avoids repeating recent lines and makes the odd unprompted remark.
 - **Mic reactions (optional add-on):** claps, bangs, sustained noise, music or a party, chatter and long silences each get their own lines, and the eyes bounce with loudness.
 - **Power saving** for the 150 mAh cell: about 12 fps while asleep, the panel switches off after 5 minutes asleep, and motion wakes it.
 
 ### User journeys
 
-| Journey | Profile | Pet names | Lines it can say | Onboarding ends with |
-|---|---|---|---|---|
-| Kid | Under 18 | BUDDY, CHAMP, FRIEND, PAL | Base, kid ("HIGH FIVE!", "HOMEWORK DONE?") and a little pet attitude | "LET'S BE FRIENDS, BUDDY!" |
-| Pet | 18+, attitude: Pet | HUMAN, BUDDY, PAL | Base and pet attitude: cat/dog energy, no flirting ("FEED ME?", "I'M THE BOSS.", "*PURR*") | "YOU MAY PET ME NOW." |
-| Cute | 18+, attitude: Cute | He: HANDSOME, TIGER… / She: GORGEOUS, QUEEN… / Skip: CUTIE, STAR… | Base, plus flirty adult lines ("OH, NICE FINGER.", "I LIKE THAT.") | "NICE TO MEET YOU, {N}." |
-| Spicy | 18+, attitude: Spicy | Same as Cute | Base, adult, plus cheeky innuendo ("BUY ME DINNER FIRST.", "UPSIDE DOWN? KINKY.") | "WELL HELLO, {N}. ;)" |
+| Attitude | Where to pick it | Pet names | Lines it can say |
+|---|---|---|---|
+| Pet | Onboarding or settings | BUDDY, CHAMP, FRIEND… | Base, pet attitude ("FEED ME?", "*PURR*") and a little encouragement |
+| Bossy / Exquisite / Balkan | Onboarding or settings | Character-specific (INTERN / GOOD SIR, MY LADY / BRATE, SESTRO) | 200 character lines each, plus base |
+| Quotes / Events | Settings | — | Base, plus quote cards or history cards |
+| Cute | Settings, after **I'M 18+** | He: HANDSOME… / She: GORGEOUS… / Skip: CUTIE… | Base, plus flirty lines ("OH, NICE FINGER.") |
+| Spicy | Settings, after **I'M 18+** | Same as Cute | Base, flirty, plus cheeky innuendo |
 
-There are about 400 reaction lines across the pools, plus 600 character lines, 107 quotes and 223 history events. Change the attitude at any time in settings (4 taps).
-
-The age gate is self-declared. Under-18 profiles never draw from the adult or spicy pools (`pickPool()`). Spicy lines are innuendo, not explicit.
+The 18+ confirmation is self-declared. Flirty and spicy pools are only drawn when it has been given (`pickPool()`). Spicy lines are innuendo, not explicit.
 
 **Pacing:** idle remarks come every 28-69 s. Taps get a spoken reply about two times in three. Low-stakes reactions wait 2.5 s after the previous message, and the eyes stay below the text while Doobie is talking.
 
@@ -106,7 +105,7 @@ The firmware detects it at boot; the serial log shows `Mic: detected`. The level
   - **Exquisite:** Victorian English ("GOOD HEAVENS!", "FETCH THE SMELLING SALTS!", "MILK FIRST? SCANDAL."). Calls you GOOD SIR, MY LADY or DEAR FRIEND.
   - **Balkan:** rowdy, friendly, laid back, with charming grammar ("AJDE, COFFEE?", "PROMAJA WILL KILL US!", "YOU TAP LIKE MY BABA."). Calls you BRATE, SESTRO or LEGENDO.
 
-  Each character has 200 lines covering every reaction, generated from `tools/gen_chars.py` (edit the lines there, then run it). The attitude menu is split across two pages. Kid profiles get everything except Cute and Spicy. Picking Quotes or Events shows a sample straight away. The content lives in `firmware/doobie/quotes.h`.
+  Each character has 200 lines covering every reaction, generated from `tools/gen_chars.py` (edit the lines there, then run it). The attitude menu is split across two pages. Cute and Spicy need the 18+ confirmation. Picking Quotes or Events shows a sample straight away. The content lives in `firmware/doobie/quotes.h`.
 - **Themes:** *Settings → Theme…* offers Light, Dark and Custom 1–3 (the active one is marked with `>`). Tapping a custom slot opens a two-step editor. First *Pick eye color*: a live preview, a dot-art colour wheel (hue around, saturation outward), a dark-to-bright slider, then SAVE. Then *Pick background* the same way, and SAVE stores and applies the theme. Custom backgrounds get the same gradient, glow, grain and dot grid as the built-in themes. Pick a near-black background to save battery. A short press on BOOT still flips between light and dark.
 - **Clock:** the board has no RTC chip, so the time comes from the ESP32's own timer. It keeps running through deep sleep, but disconnecting the battery or pressing RST loses it. Set the time in *Settings → Time* (top third of the screen = +, bottom third = −, hold to repeat, tap the middle for next / save), or run `python3 tools/timesync.py /dev/cu.usbmodem…` over USB. The time shows in the bottom-left corner. Mornings (6–10) bring morning lines; nights (22–05) bring bedtime lines, and Doobie gets sleepy twice as fast.
 - **Pomodoro:** *Settings → Focus…* opens a submenu with Start/Stop, focus length (15/20/25/30/45/50 min), break length (3/5/10), long break every 4th round (10/15/20/30), and Auto (whether the next round starts by itself after a break). All of these are saved. The defaults are 25 / 5 / 15 with Auto on. During focus the eyes squint, it stays quiet and awake, and taps get a "SHH. FOCUS.". The bottom-left shows `FOCUS mm:ss` over a shrinking orange bar. It announces each break and each return to work. Stop it from the submenu.

@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.0
+//  DOOBIE COMPANION, firmware 1.1
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -33,7 +33,7 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.0"
+#define FW_VERSION "1.1"
 
 void powerOff(const char *msg);
 extern OnbStep ob;
@@ -474,8 +474,8 @@ const Pool *pickPool(Ev e) {
     return &P.base;
   }
   if (!profAdult) {
-    if (e == EV_IDLE && roll < 35) return &KID_IDLE;
-    if (P.pet.n && roll >= 70) return &P.pet;
+    if (e == EV_IDLE && roll < 12) return &KID_IDLE;
+    if (P.pet.n && roll >= 55) return &P.pet;
     return &P.base;
   }
   if (profSpicy && P.spicy.n && roll < 40) return &P.spicy;
@@ -928,7 +928,7 @@ void brackets(int x, int y, int w, int h, float t) {   // orange corner brackets
   g->fillRect(x - p, y + h + p - 3, L, 3, o); g->fillRect(x - p, y + h + p - L, 3, L, o);
   g->fillRect(x + w + p - L, y + h + p - 3, L, 3, o); g->fillRect(x + w + p - 3, y + h + p - L, 3, L, o);
 }
-int totalSteps() { return profAdult ? 6 : 5; }
+int totalSteps() { return 5; }   // mode, who, attitude, tilt, tap
 void stepHeaderN(int n, const char *title) { char b[4]; snprintf(b, sizeof(b), "%02d", n); stepHeader(b, title); }
 
 void stepHeader(const char *num, const char *title) {
@@ -1097,11 +1097,13 @@ int obChoose(int stepN, const char *title, const Choice *c, int n) {
 
 const Choice CH_SEX[]   = { {"HE", "HIM / MALE"}, {"SHE", "HER / FEMALE"}, {"SKIP", "RATHER NOT SAY"} };
 const Choice CH_AGE[]   = { {"UNDER 18", "KID MODE"}, {"18+", "GROWN-UP MODE"} };
-const Choice CH_TONE[]  = { {"PET", "PET ATTITUDE. NO FLIRTING."}, {"CUTE", "CHARMING, NEVER RUDE."}, {"SPICY", "CHEEKY. MAY SAY IT IN PUBLIC."} };
+// Onboarding attitude: everyone-friendly characters. Cute/Spicy live in settings behind an 18+ confirm.
+const Choice CH_TONE[]  = { {"PET", "CAT AND DOG ENERGY"}, {"BOSSY", "CEO WITH A STOPWATCH"}, {"EXQUISITE", "VICTORIAN MANNERS"}, {"BALKAN", "AJDE, NO STRESS"} };
+const uint8_t CH_TONE_ID[4] = { 0, 5, 6, 7 };
 
 void obSex() {
   int r = obChoose(2, "WHO ARE YOU?", CH_SEX, 3);
-  if (r >= 0) { profSex = r; obGo(OB_AGE); }
+  if (r >= 0) { profSex = r; obGo(OB_SPICY); }
 }
 void obAge() {
   int r = obChoose(3, "HOW OLD?", CH_AGE, 2);
@@ -1112,16 +1114,17 @@ void obAge() {
   }
 }
 void obSpicy() {
-  int r = obChoose(4, "ATTITUDE", CH_TONE, 3);
+  int r = obChoose(3, "ATTITUDE", CH_TONE, 4);
   if (r >= 0) {
-    profTone = r; obGo(OB_TILT);
-    sayText(r == 2 ? "OH MY. ;)" : r == 1 ? "CHARMED, I'M SURE." : "OK. I'M THE BOSS.");
+    profTone = CH_TONE_ID[r]; obGo(OB_TILT);
+    say(EV_GREET);                                   // first words in the chosen voice
   }
 }
 
 // Settings (4 taps in 1 s). Two pages; toggles apply instantly; closes after 10 s idle.
 uint32_t settingsTouched = 0;
 int settingsPage = 0;
+uint8_t pendingTone = 0;          // Cute/Spicy waiting on the 18+ confirm
 void openSettings() { obGo(OB_SETTINGS); settingsPage = 0; settingsTouched = millis(); tapEvent = false; choicePicked = -1; speechText = nullptr; }
 void openClockSet();
 void openColorEditor(int slot);
@@ -1144,10 +1147,13 @@ void obSettings() {
     snprintf(toneTxt, sizeof(toneTxt), "%s", "ATTITUDE...");
     items[n] = { toneTxt, "PET, CUTE, SPICY, QUOTES, EVENTS" }; ids[n++] = 17;
     items[n] = { "MORE...", nullptr }; ids[n++] = 12;
+  } else if (settingsPage == 6) {                   // 18+ confirm for Cute / Spicy
+    items[n] = { "I'M 18+", "UNLOCKS CUTE AND SPICY" }; ids[n++] = 50;
+    items[n] = { "CANCEL", nullptr }; ids[n++] = 51;
   } else if (settingsPage == 4 || settingsPage == 5) {
     static char aTxt[TONE_COUNT][16];
     int allowed[TONE_COUNT], na = 0;
-    for (int i = 0; i < TONE_COUNT; i++) if (profAdult || (i != 1 && i != 2)) allowed[na++] = i;   // no flirting for kids
+    for (int i = 0; i < TONE_COUNT; i++) allowed[na++] = i;
     int from = settingsPage == 4 ? 0 : 4, to = settingsPage == 4 ? min(4, na) : na;
     for (int k = from; k < to; k++) {
       int i = allowed[k];
@@ -1184,7 +1190,7 @@ void obSettings() {
     items[n] = { "EXIT", nullptr }; ids[n++] = 3;
   }
   if (touchDown) settingsTouched = millis();
-  int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : settingsPage == 1 ? "SETTINGS 2/2" : settingsPage == 2 ? "FOCUS" : settingsPage == 3 ? "THEME" : settingsPage == 4 ? "ATTITUDE 1/2" : "ATTITUDE 2/2", items, n);
+  int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : settingsPage == 1 ? "SETTINGS 2/2" : settingsPage == 2 ? "FOCUS" : settingsPage == 3 ? "THEME" : settingsPage == 4 ? "ATTITUDE 1/2" : settingsPage == 5 ? "ATTITUDE 2/2" : "18+ ONLY", items, n);
   if (r >= 0) {
     settingsTouched = millis();
     switch (ids[r]) {
@@ -1202,7 +1208,11 @@ void obSettings() {
       case 17: settingsPage = 4; obT0 = millis(); return;
       case 18: settingsPage = 5; obT0 = millis(); return;
       case 19: settingsPage = 4; obT0 = millis(); return;
+      case 50: profAdult = true; prefs.putBool("adult", true); profTone = pendingTone; prefs.putUChar("tone", profTone);
+               obGo(OB_FINISHED); lastMotion = millis(); say(EV_GREET); return;
+      case 51: settingsPage = 4; obT0 = millis(); return;
       case 40: case 41: case 42: case 43: case 44: case 45: case 46: case 47:
+        if ((ids[r] == 41 || ids[r] == 42) && !profAdult) { pendingTone = ids[r] - 40; settingsPage = 6; obT0 = millis(); return; }
         profTone = ids[r] - 40; prefs.putUChar("tone", profTone);
         if ((profTone == 3 || profTone == 4)) {                                    // show a sample straight away
           obGo(OB_FINISHED); lastMotion = millis();
@@ -1357,13 +1367,13 @@ void obTilt() {
   static uint32_t tiltHeld = 0;
   uint32_t t = obT();
   drawBackground();
-  stepHeaderN(profAdult ? 5 : 4, "TILT ME");
+  stepHeaderN(4, "TILT ME");
   if (t > 2000 && t < 2050) sayText("TILT ME.");
   bool tilted = sqrtf(gravX * gravX + gravY * gravY) > 0.35f;
   if (tilted) { if (!tiltHeld) tiltHeld = millis(); } else tiltHeld = 0;
   drawFace(t / 1000.0f);
   drawSpeech();
-  progressDots(profAdult ? 5 : 4, totalSteps());
+  progressDots(4, totalSteps());
   if ((tiltHeld && millis() - tiltHeld > 600) || t > 12000) {
     tiltHeld = 0; sayText("WHEEE.");
     setMood(HAPPY, 1200); obGo(OB_TAP); tapEvent = false;
@@ -1372,12 +1382,12 @@ void obTilt() {
 void obTap() {
   uint32_t t = obT();
   drawBackground();
-  stepHeaderN(profAdult ? 6 : 5, "TAP ME");
+  stepHeaderN(5, "TAP ME");
   if (t > 1600 && t < 1650) sayText("NOW TAP ME.");
   drawFace(t / 1000.0f);
   drawSpeech();
   progressDots(totalSteps(), totalSteps());
-  if (tapEvent || t > 15000) { tapEvent = false; setMood(HAPPY, 2000); blushT = 1; sayText(!profAdult ? "LET'S BE FRIENDS, {N}!" : profTone == 2 ? "WELL HELLO, {N}. ;)" : profTone == 1 ? "NICE TO MEET YOU, {N}." : "YOU MAY PET ME NOW."); obGo(OB_DONE); }
+  if (tapEvent || t > 15000) { tapEvent = false; setMood(HAPPY, 2000); blushT = 1; sayText(profTone == 5 ? "GOOD. NOW BACK TO WORK, {N}." : profTone == 6 ? "CHARMED, {N}. TRULY." : profTone == 7 ? "AJDE, NOW WE ARE FRIENDS!" : "YOU MAY PET ME NOW."); obGo(OB_DONE); }
 }
 void obDone() {
   uint32_t t = obT();
@@ -1398,6 +1408,7 @@ void obDone() {
 }
 
 void startOnboarding() {
+  profAdult = false;                               // 18+ content needs a fresh confirm
   talkative = false; asleep = false; special = SP_NONE; speechText = nullptr;
   brightTarget = userBright(); panel->setBrightness(userBright()); brightness = userBright();
   obGo(OB_BOOT);
@@ -1513,7 +1524,7 @@ void setup() {
   if (prefs.isKey("tone")) profTone = prefs.getUChar("tone", 0);
   else profTone = prefs.getBool("spicy", false) ? 2 : (profAdult ? 1 : 0);
   if (profTone >= TONE_COUNT) profTone = 0;
-  if (!profAdult && (profTone == 1 || profTone == 2)) profTone = 0;
+  if (!profAdult && (profTone == 1 || profTone == 2)) profTone = 0;   // needs the 18+ confirm
   Serial.printf("Profile: sex=%d adult=%d tone=%s\n", profSex, profAdult, TONE_NAME[profTone]);
   curL = curR = moodShape(NEUTRAL, true);
   randomSeed(esp_random());
