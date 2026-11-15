@@ -516,8 +516,8 @@ void sayEvent() {
   if (clockValid()) { time_t t = time(nullptr); struct tm tmv; gmtime_r(&t, &tmv); month = tmv.tm_mon + 1; }
   uint16_t idx = 0; bool thisMonth = false;
   if (month > 0 && random(100) < 60) {
-    uint16_t hits[48]; int nh = 0;
-    for (uint16_t i = 0; i < HIST_COUNT && nh < 48; i++) if (HIST[i].month == month) hits[nh++] = i;
+    uint16_t hits[96]; int nh = 0;
+    for (uint16_t i = 0; i < HIST_COUNT && nh < 96; i++) if (HIST[i].month == month) hits[nh++] = i;
     if (nh) { idx = hits[pickFresh(nh, 0xE700 + month)]; thisMonth = true; }
   }
   if (!thisMonth) idx = pickFresh(HIST_COUNT, 0xE000);

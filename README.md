@@ -98,8 +98,8 @@ The firmware detects it at boot; the serial log shows `Mic: detected`. The level
   - **Pet:** cat/dog attitude, no flirting.
   - **Cute:** charming, never rude (18+).
   - **Spicy:** cheeky innuendo (18+).
-  - **Quotes:** most idle remarks become quote cards, chosen from 107 short quotes by famous people with the attribution in orange.
-  - **Events:** most idle remarks become history cards, chosen from 223 events, each with its month and year. When the clock is set, it prefers "THIS MONTH IN 19xx".
+  - **Quotes:** most idle remarks become quote cards, chosen from 311 short quotes by famous people with the attribution in orange.
+  - **Events:** most idle remarks become history cards, chosen from 421 events, each with its month and year. When the clock is set, it prefers "THIS MONTH IN 19xx".
 
   - **Bossy:** a CEO with a stopwatch ("CHOP CHOP.", "PER MY LAST MESSAGE...", "DON'T DENT THE CEO."). Calls you INTERN.
   - **Exquisite:** Victorian English ("GOOD HEAVENS!", "FETCH THE SMELLING SALTS!", "MILK FIRST? SCANDAL."). Calls you GOOD SIR, MY LADY or DEAR FRIEND.
