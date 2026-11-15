@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 0.9
+//  DOOBIE COMPANION, firmware 1.0
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -31,8 +31,9 @@
 #include "eyetypes.h"
 #include "phrases.h"
 #include "quotes.h"
+#include "chars.h"
 
-#define FW_VERSION "0.9"
+#define FW_VERSION "1.0"
 
 void powerOff(const char *msg);
 extern OnbStep ob;
@@ -436,14 +437,17 @@ bool speaking() { return speechText && millis() - speechStart < speechDuration(s
 // ---------- user profile (set during onboarding) ----------
 uint8_t profSex = 2;            // 0 he, 1 she, 2 skip
 bool profAdult = false;         // under-18 profiles never see ADULT/SPICY lines
-// Attitude: 0 pet, 1 cute (flirty), 2 spicy, 3 quotes, 4 events. Kids: 0, 3, 4 only.
+// Attitude: 0 pet, 1 cute (flirty), 2 spicy, 3 quotes, 4 events,
+//           5 bossy, 6 exquisite (Victorian), 7 balkan. Kids: everything but 1 and 2.
 uint8_t profTone = 0;
 #define profSpicy (profAdult && profTone == 2)
 #define profFlirt (profAdult && (profTone == 1 || profTone == 2))
-const char *const TONE_NAME[5] = { "PET", "CUTE", "SPICY", "QUOTES", "EVENTS" };
+const char *const TONE_NAME[8] = { "PET", "CUTE", "SPICY", "QUOTES", "EVENTS", "BOSSY", "EXQUISITE", "BALKAN" };
+#define TONE_COUNT 8
 char speechBuf[128];             // quotes run up to ~90 chars
 
 const char *petName() {
+  if (profTone >= 5) return CHAR_PET[profTone - 5][profAdult ? min((int)profSex, 2) : 2][random(4)];
   if (!profAdult)   return PET_KID[random(4)];
   if (!profFlirt) return PET_REG[random(4)];
   if (profSex == 0) return PET_MALE[random(4)];
@@ -464,6 +468,11 @@ void sayText(const char *s) {                 // expands {N} to a pet name
 const Pool *pickPool(Ev e) {
   const EvPools &P = EVENTS[e];
   int roll = random(100);
+  if (profTone >= 5) {                          // character packs override, base fills gaps
+    const Pool *cp = &CHARS[profTone - 5][e];
+    if (cp->n && roll < (e == EV_IDLE ? 88 : 78)) return cp;
+    return &P.base;
+  }
   if (!profAdult) {
     if (e == EV_IDLE && roll < 35) return &KID_IDLE;
     if (P.pet.n && roll >= 70) return &P.pet;
@@ -536,7 +545,7 @@ void say(Ev e, bool force = true) {
   }
   recent[recentHead++ & 7] = (uint16_t)((uintptr_t)L->items[idx] >> 2);
   // QUOTES / EVENTS attitudes: most idle remarks become cards
-  if (e == EV_IDLE && profTone >= 3 && random(100) < 70) {
+  if (e == EV_IDLE && (profTone == 3 || profTone == 4) && random(100) < 70) {
     if (profTone == 3) sayQuote(); else sayEvent();
     nextIdleTalk = speechEndsAt + random(28000, 69000);
     return;
@@ -1123,7 +1132,7 @@ void pomoStop()  { pomo = POMO_OFF; sayText("FOCUS OFF. GOOD JOB."); }
 
 void obSettings() {
   static char modeTxt[16], toneTxt[16], clockTxt[16], focusTxt[16], brightTxt[16];
-  Choice items[7]; int n = 0, ids[7];
+  Choice items[8]; int n = 0, ids[8];
   if (settingsPage == 0) {
     snprintf(focusTxt, sizeof(focusTxt), "%s", pomo == POMO_FOCUS ? "FOCUS: ON" : pomo == POMO_BREAK ? "FOCUS: BRK" : "FOCUS...");
     items[n] = { focusTxt, "POMODORO TIMER" }; ids[n++] = 15;
@@ -1135,14 +1144,18 @@ void obSettings() {
     snprintf(toneTxt, sizeof(toneTxt), "%s", "ATTITUDE...");
     items[n] = { toneTxt, "PET, CUTE, SPICY, QUOTES, EVENTS" }; ids[n++] = 17;
     items[n] = { "MORE...", nullptr }; ids[n++] = 12;
-  } else if (settingsPage == 4) {
-    static char aTxt[5][16];
-    for (int i = 0; i < 5; i++) {
-      if (!profAdult && (i == 1 || i == 2)) continue;          // no flirting for kids
-      snprintf(aTxt[i], sizeof(aTxt[i]), "%s%s", profTone == i ? "> " : "", TONE_NAME[i]);
+  } else if (settingsPage == 4 || settingsPage == 5) {
+    static char aTxt[TONE_COUNT][16];
+    int allowed[TONE_COUNT], na = 0;
+    for (int i = 0; i < TONE_COUNT; i++) if (profAdult || (i != 1 && i != 2)) allowed[na++] = i;   // no flirting for kids
+    int from = settingsPage == 4 ? 0 : 4, to = settingsPage == 4 ? min(4, na) : na;
+    for (int k = from; k < to; k++) {
+      int i = allowed[k];
+      snprintf(aTxt[i], sizeof(aTxt[i]), "%s%s", profTone == i ? ">" : "", TONE_NAME[i]);
       items[n] = { aTxt[i], nullptr }; ids[n++] = 40 + i;
     }
-    items[n] = { "BACK", nullptr }; ids[n++] = 13;
+    if (settingsPage == 4) { items[n] = { "MORE...", nullptr }; ids[n++] = 18; }
+    else { items[n] = { "BACK", nullptr }; ids[n++] = 19; }
   } else if (settingsPage == 3) {
     static char tTxt[5][16];
     const char *names[5] = { "LIGHT", "DARK", "CUSTOM 1", "CUSTOM 2", "CUSTOM 3" };
@@ -1171,7 +1184,7 @@ void obSettings() {
     items[n] = { "EXIT", nullptr }; ids[n++] = 3;
   }
   if (touchDown) settingsTouched = millis();
-  int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : settingsPage == 1 ? "SETTINGS 2/2" : settingsPage == 2 ? "FOCUS" : settingsPage == 3 ? "THEME" : "ATTITUDE", items, n);
+  int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : settingsPage == 1 ? "SETTINGS 2/2" : settingsPage == 2 ? "FOCUS" : settingsPage == 3 ? "THEME" : settingsPage == 4 ? "ATTITUDE 1/2" : "ATTITUDE 2/2", items, n);
   if (r >= 0) {
     settingsTouched = millis();
     switch (ids[r]) {
@@ -1187,13 +1200,18 @@ void obSettings() {
       case 15: settingsPage = 2; obT0 = millis(); return;
       case 16: settingsPage = 3; obT0 = millis(); return;
       case 17: settingsPage = 4; obT0 = millis(); return;
-      case 40: case 41: case 42: case 43: case 44:
+      case 18: settingsPage = 5; obT0 = millis(); return;
+      case 19: settingsPage = 4; obT0 = millis(); return;
+      case 40: case 41: case 42: case 43: case 44: case 45: case 46: case 47:
         profTone = ids[r] - 40; prefs.putUChar("tone", profTone);
-        if (profTone >= 3) {                                    // show a sample straight away
+        if ((profTone == 3 || profTone == 4)) {                                    // show a sample straight away
           obGo(OB_FINISHED); lastMotion = millis();
           if (profTone == 3) sayQuote(); else sayEvent();
           nextIdleTalk = speechEndsAt + 20000;
           return;
+        }
+        if (profTone >= 5) {                                    // characters introduce themselves
+          obGo(OB_FINISHED); lastMotion = millis(); say(EV_GREET); return;
         }
         break;
       case 30: case 31: applyThemeId(ids[r] - 30); saveTheme(); break;
@@ -1494,7 +1512,7 @@ void setup() {
   // 0.3 stored a "spicy" bool; map it: spicy -> 2, otherwise flirty (what 0.3 adults got)
   if (prefs.isKey("tone")) profTone = prefs.getUChar("tone", 0);
   else profTone = prefs.getBool("spicy", false) ? 2 : (profAdult ? 1 : 0);
-  if (profTone > 4) profTone = 0;
+  if (profTone >= TONE_COUNT) profTone = 0;
   if (!profAdult && (profTone == 1 || profTone == 2)) profTone = 0;
   Serial.printf("Profile: sex=%d adult=%d tone=%s\n", profSex, profAdult, TONE_NAME[profTone]);
   curL = curR = moodShape(NEUTRAL, true);

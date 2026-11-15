@@ -59,7 +59,7 @@ arduino-cli upload  -b "$FQBN" -p /dev/cu.usbmodem* firmware/doobie
 | Cute | 18+, attitude: Cute | He: HANDSOME, TIGER… / She: GORGEOUS, QUEEN… / Skip: CUTIE, STAR… | Base, plus flirty adult lines ("OH, NICE FINGER.", "I LIKE THAT.") | "NICE TO MEET YOU, {N}." |
 | Spicy | 18+, attitude: Spicy | Same as Cute | Base, adult, plus cheeky innuendo ("BUY ME DINNER FIRST.", "UPSIDE DOWN? KINKY.") | "WELL HELLO, {N}. ;)" |
 
-There are about 400 reaction lines across the pools, plus 107 quotes and 223 history events. Change the attitude at any time in settings (4 taps).
+There are about 400 reaction lines across the pools, plus 600 character lines, 107 quotes and 223 history events. Change the attitude at any time in settings (4 taps).
 
 The age gate is self-declared. Under-18 profiles never draw from the adult or spicy pools (`pickPool()`). Spicy lines are innuendo, not explicit.
 
@@ -102,7 +102,11 @@ The firmware detects it at boot; the serial log shows `Mic: detected`. The level
   - **Quotes:** most idle remarks become quote cards, chosen from 107 short quotes by famous people with the attribution in orange.
   - **Events:** most idle remarks become history cards, chosen from 223 events, each with its month and year. When the clock is set, it prefers "THIS MONTH IN 19xx".
 
-  Kid profiles only see Pet, Quotes and Events. Picking Quotes or Events shows a sample straight away. The content lives in `firmware/doobie/quotes.h`.
+  - **Bossy:** a CEO with a stopwatch ("CHOP CHOP.", "PER MY LAST MESSAGE...", "DON'T DENT THE CEO."). Calls you INTERN.
+  - **Exquisite:** Victorian English ("GOOD HEAVENS!", "FETCH THE SMELLING SALTS!", "MILK FIRST? SCANDAL."). Calls you GOOD SIR, MY LADY or DEAR FRIEND.
+  - **Balkan:** rowdy, friendly, laid back, with charming grammar ("AJDE, COFFEE?", "PROMAJA WILL KILL US!", "YOU TAP LIKE MY BABA."). Calls you BRATE, SESTRO or LEGENDO.
+
+  Each character has 200 lines covering every reaction, generated from `tools/gen_chars.py` (edit the lines there, then run it). The attitude menu is split across two pages. Kid profiles get everything except Cute and Spicy. Picking Quotes or Events shows a sample straight away. The content lives in `firmware/doobie/quotes.h`.
 - **Themes:** *Settings → Theme…* offers Light, Dark and Custom 1–3 (the active one is marked with `>`). Tapping a custom slot opens a two-step editor. First *Pick eye color*: a live preview, a dot-art colour wheel (hue around, saturation outward), a dark-to-bright slider, then SAVE. Then *Pick background* the same way, and SAVE stores and applies the theme. Custom backgrounds get the same gradient, glow, grain and dot grid as the built-in themes. Pick a near-black background to save battery. A short press on BOOT still flips between light and dark.
 - **Clock:** the board has no RTC chip, so the time comes from the ESP32's own timer. It keeps running through deep sleep, but disconnecting the battery or pressing RST loses it. Set the time in *Settings → Time* (top third of the screen = +, bottom third = −, hold to repeat, tap the middle for next / save), or run `python3 tools/timesync.py /dev/cu.usbmodem…` over USB. The time shows in the bottom-left corner. Mornings (6–10) bring morning lines; nights (22–05) bring bedtime lines, and Doobie gets sleepy twice as fast.
 - **Pomodoro:** *Settings → Focus…* opens a submenu with Start/Stop, focus length (15/20/25/30/45/50 min), break length (3/5/10), long break every 4th round (10/15/20/30), and Auto (whether the next round starts by itself after a break). All of these are saved. The defaults are 25 / 5 / 15 with Auto on. During focus the eyes squint, it stays quiet and awake, and taps get a "SHH. FOCUS.". The bottom-left shows `FOCUS mm:ss` over a shrinking orange bar. It announces each break and each return to work. Stop it from the submenu.
