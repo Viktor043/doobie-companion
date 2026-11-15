@@ -46,7 +46,7 @@ arduino-cli upload  -b "$FQBN" -p /dev/cu.usbmodem* firmware/doobie
 | Leave it still for 20 s / 45 s | Sleepy / asleep (dims) |
 
 - **Profile questions** during onboarding: *he / she / skip*, then an attitude: *Pet*, *Bossy*, *Refined* or *Balkan*. There's no age question. Cute (mildly flirty) is only in settings, behind a one-time **I'M 18+** confirmation. Redoing onboarding locks it again. There is no spicy content.
-- **Speech:** about 400 short lines (`phrases.h`), typed out in a 5x7 dot font and dissolved away. Lines come in tiers (base, kid, pet, adult, spicy), and `{N}` is swapped for a pet name that suits the profile. It avoids repeating recent lines and makes the odd unprompted remark.
+- **Speech:** about 400 short lines (`phrases.h`), typed out in a 5x7 dot font and dissolved away. Lines come in tiers (base, kid, pet, adult), and `{N}` is swapped for a pet name that suits the profile. It avoids repeating recent lines and makes the odd unprompted remark.
 - **Mic reactions (optional add-on):** claps, bangs, sustained noise, music or a party, chatter and long silences each get their own lines, and the eyes bounce with loudness.
 - **Power saving** for the 150 mAh cell: about 12 fps while asleep, the panel switches off after 5 minutes asleep, and motion wakes it.
 
