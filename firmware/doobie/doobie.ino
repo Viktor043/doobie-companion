@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 0.7
+//  DOOBIE COMPANION, firmware 0.8
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -31,7 +31,7 @@
 #include "eyetypes.h"
 #include "phrases.h"
 
-#define FW_VERSION "0.7"
+#define FW_VERSION "0.8"
 
 void powerOff(const char *msg);
 extern OnbStep ob;
@@ -124,7 +124,61 @@ void buildBackground(uint16_t *b, bool dark, int f) {
     b[y * W + x] = rgb((uint8_t)clampf(r + n, 0, 255), (uint8_t)clampf(gg + n, 0, 255), (uint8_t)clampf(bl + n, 0, 255));
   }
 }
+// ---- Themes: 0 light, 1 dark, 2..4 custom 1-3 (eye colour + background colour)
+uint8_t themeId = 0;
+uint32_t customEye[3] = { 0x28F0D4, 0xFF5C8C, 0xFFC24B };
+uint32_t customBg[3]  = { 0x06161C, 0x1A0B2E, 0x0E2216 };
+static inline float lum(uint32_t c) { return 0.30f * ((c >> 16) & 255) + 0.59f * ((c >> 8) & 255) + 0.11f * (c & 255); }
+static inline uint16_t rgb565(uint32_t c) { return rgb((c >> 16) & 255, (c >> 8) & 255, c & 255); }
+
+uint32_t hsv2rgb(float h, float s, float v) {
+  h = fmodf(h, 360.0f); if (h < 0) h += 360.0f;
+  float c = v * s, x = c * (1 - fabsf(fmodf(h / 60.0f, 2) - 1)), m = v - c, r, g2, b;
+  if (h < 60) { r = c; g2 = x; b = 0; } else if (h < 120) { r = x; g2 = c; b = 0; }
+  else if (h < 180) { r = 0; g2 = c; b = x; } else if (h < 240) { r = 0; g2 = x; b = c; }
+  else if (h < 300) { r = x; g2 = 0; b = c; } else { r = c; g2 = 0; b = x; }
+  return ((uint32_t)((r + m) * 255) << 16) | ((uint32_t)((g2 + m) * 255) << 8) | (uint32_t)((b + m) * 255);
+}
+void rgb2hsv(uint32_t c, float &h, float &s, float &v) {
+  float r = ((c >> 16) & 255) / 255.0f, g2 = ((c >> 8) & 255) / 255.0f, b = (c & 255) / 255.0f;
+  float mx = fmaxf(r, fmaxf(g2, b)), mn = fminf(r, fminf(g2, b)), dd = mx - mn;
+  v = mx; s = mx > 0 ? dd / mx : 0;
+  if (dd == 0) h = 0;
+  else if (mx == r) h = 60 * fmodf((g2 - b) / dd, 6);
+  else if (mx == g2) h = 60 * ((b - r) / dd + 2);
+  else h = 60 * ((r - g2) / dd + 4);
+  if (h < 0) h += 360;
+}
+
+// Custom background: same composition as the built-in themes (diagonal falloff,
+// soft glow, film grain, faint unlit dot grid) but tinted from any colour.
+void buildBackgroundCustom(uint16_t *b, uint32_t c, int f) {
+  const float R = (c >> 16) & 255, G = (c >> 8) & 255, B = c & 255, L = lum(c);
+  const float amp = 6 + 28 * L / 255.0f;
+  for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+    float t = clampf((x * 0.35f + y) / (W * 0.35f + H), 0, 1);
+    float gx = (x - W * 0.3f) / W, gy = (y - H * 0.22f) / H;
+    float glow = expf(-(gx * gx + gy * gy) * 6.0f), k = 1 - 0.32f * t;
+    float r = R * k + (255 - R) * 0.22f * glow, gg = G * k + (255 - G) * 0.22f * glow, bl = B * k + (255 - B) * 0.22f * glow;
+    int dx = (x % PITCH) - PITCH / 2, dy = (y % PITCH) - PITCH / 2;
+    if (dx * dx + dy * dy <= 2) { if (L > 90) { r *= 0.88f; gg *= 0.88f; bl *= 0.88f; } else { r += 14; gg += 14; bl += 14; } }
+    float n = ((hash32(x * 7919 + y * 104729 + f * 15485863) & 0xFF) / 255.0f - 0.5f) * amp;
+    b[y * W + x] = rgb((uint8_t)clampf(r + n, 0, 255), (uint8_t)clampf(gg + n, 0, 255), (uint8_t)clampf(bl + n, 0, 255));
+  }
+}
+void applyTheme(bool dark);
+void applyThemeId(uint8_t id) {
+  if (id <= 1) { applyTheme(id == 1); return; }
+  themeId = id;
+  uint32_t e = customEye[id - 2], bg = customBg[id - 2];
+  C_INK = rgb565(e);
+  darkMode = lum(bg) < 90;
+  for (int f = 0; f < GRAIN_FRAMES; f++) buildBackgroundCustom(bgFrames[f], bg, f);
+}
+void saveTheme() { prefs.putUChar("theme", themeId); prefs.putBool("dark", darkMode); }
+
 void applyTheme(bool dark) {
+  themeId = dark ? 1 : 0;
   darkMode = dark;
   C_INK = dark ? C_TEAL : rgb(4, 38, 44);
   for (int f = 0; f < GRAIN_FRAMES; f++) buildBackground(bgFrames[f], dark, f);
@@ -918,7 +972,7 @@ void obModeZoom() {
   drawTile(modeHover, z, false, t / 1000.0f);
   if (t > 500) {
     applyTheme(modeHover == 1);
-    prefs.putBool("dark", darkMode);
+    saveTheme();
     obGo(OB_SEX); tapEvent = false;
   }
 }
@@ -994,6 +1048,7 @@ uint32_t settingsTouched = 0;
 int settingsPage = 0;
 void openSettings() { obGo(OB_SETTINGS); settingsPage = 0; settingsTouched = millis(); tapEvent = false; choicePicked = -1; speechText = nullptr; }
 void openClockSet();
+void openColorEditor(int slot);
 char pomoMsg[24];
 void pomoStart() { pomo = POMO_FOCUS; pomoLen = FOCUS_MS; pomoEnd = millis() + pomoLen; pomoCount = 0; setMood(FOCUS, 1500);
   snprintf(pomoMsg, sizeof(pomoMsg), "FOCUS TIME. %d MIN.", FOCUS_OPTS[focusIdx]); sayText(pomoMsg); }
@@ -1008,10 +1063,18 @@ void obSettings() {
     int h, m;
     if (localHM(h, m)) snprintf(clockTxt, sizeof(clockTxt), "TIME %02d:%02d", h, m); else snprintf(clockTxt, sizeof(clockTxt), "SET TIME");
     items[n] = { clockTxt, "TAP TO SET THE CLOCK" }; ids[n++] = 11;
-    snprintf(modeTxt, sizeof(modeTxt), "%s", darkMode ? "DARK MODE" : "LIGHT MODE");
-    items[n] = { modeTxt, "TAP TO SWITCH" }; ids[n++] = 0;
+    snprintf(modeTxt, sizeof(modeTxt), "%s", "THEME...");
+    items[n] = { modeTxt, "LIGHT, DARK, CUSTOM" }; ids[n++] = 16;
     if (profAdult) { snprintf(toneTxt, sizeof(toneTxt), "%s", TONE_NAME[profTone]); items[n] = { toneTxt, "TAP TO CHANGE VIBE" }; ids[n++] = 1; }
     items[n] = { "MORE...", nullptr }; ids[n++] = 12;
+  } else if (settingsPage == 3) {
+    static char tTxt[5][16];
+    const char *names[5] = { "LIGHT", "DARK", "CUSTOM 1", "CUSTOM 2", "CUSTOM 3" };
+    for (int i = 0; i < 5; i++) {
+      snprintf(tTxt[i], sizeof(tTxt[i]), "%s%s", themeId == i ? "> " : "", names[i]);
+      items[n] = { tTxt[i], i >= 2 ? "TAP TO EDIT" : nullptr }; ids[n++] = 30 + i;
+    }
+    items[n] = { "BACK", nullptr }; ids[n++] = 13;
   } else if (settingsPage == 2) {
     static char fTxt[16], bTxt[16], lTxt[16];
     snprintf(fTxt, sizeof(fTxt), "FOCUS %d", FOCUS_OPTS[focusIdx]);
@@ -1032,11 +1095,11 @@ void obSettings() {
     items[n] = { "EXIT", nullptr }; ids[n++] = 3;
   }
   if (touchDown) settingsTouched = millis();
-  int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : settingsPage == 1 ? "SETTINGS 2/2" : "FOCUS", items, n);
+  int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : settingsPage == 1 ? "SETTINGS 2/2" : settingsPage == 2 ? "FOCUS" : "THEME", items, n);
   if (r >= 0) {
     settingsTouched = millis();
     switch (ids[r]) {
-      case 0:  applyTheme(!darkMode); prefs.putBool("dark", darkMode); break;
+      case 0:  applyTheme(!darkMode); saveTheme(); break;
       case 1:  profTone = (profTone + 1) % 3; prefs.putUChar("tone", profTone); break;
       case 2:  startOnboarding(); return;
       case 3:  obGo(OB_FINISHED); sayText("BYE, SETTINGS."); lastMotion = millis(); return;
@@ -1046,6 +1109,9 @@ void obSettings() {
       case 12: settingsPage = 1; obT0 = millis(); return;
       case 13: settingsPage = 0; obT0 = millis(); return;
       case 15: settingsPage = 2; obT0 = millis(); return;
+      case 16: settingsPage = 3; obT0 = millis(); return;
+      case 30: case 31: applyThemeId(ids[r] - 30); saveTheme(); break;
+      case 32: case 33: case 34: openColorEditor(ids[r] - 32); return;
       case 20: focusIdx = (focusIdx + 1) % sizeof(FOCUS_OPTS); prefs.putUChar("fmin", focusIdx); break;
       case 21: breakIdx = (breakIdx + 1) % sizeof(BREAK_OPTS); prefs.putUChar("bmin", breakIdx); break;
       case 22: longIdx = (longIdx + 1) % sizeof(LONG_OPTS); prefs.putUChar("lmin", longIdx); break;
@@ -1055,6 +1121,86 @@ void obSettings() {
     }
   }
   if (millis() - settingsTouched > 10000) { obGo(OB_FINISHED); lastMotion = millis(); }
+}
+
+// Custom theme editor: step 0 eye colour, step 1 background colour.
+// Dot-art colour wheel (hue around, saturation outward), value slider, SAVE.
+int colSlot = 0, colStep = 0;
+float colH = 170, colS = 0.8f, colV = 1.0f;
+uint32_t colEyePick = 0, colTouched = 0;
+const int WH_CX = W / 2, WH_CY = 206, WH_R = 96, SL_Y = 322, SV_Y = 362, SV_H = 44;
+void openColorEditor(int slot) {
+  colSlot = slot; colStep = 0;
+  rgb2hsv(customEye[slot], colH, colS, colV);
+  obGo(OB_COLOR); tapEvent = false; colTouched = millis();
+}
+void obColor() {
+  const uint16_t UI = rgb(225, 235, 235);
+  uint16_t savedInk = C_INK; C_INK = UI;               // menu chrome in neutral white
+  memcpy(g->getFramebuffer(), bgBlack, W * H * 2);
+  uint32_t cur = hsv2rgb(colH, colS, colV);
+  uint32_t eyeC = colStep == 0 ? cur : colEyePick;
+  uint32_t bgC  = colStep == 1 ? cur : customBg[colSlot];
+  char title[24]; snprintf(title, sizeof(title), "%s  C%d", colStep == 0 ? "PICK EYE COLOR" : "PICK BACKGROUND", colSlot + 1);
+  stepHeader("", title);
+
+  // live preview: background swatch with mini eyes
+  g->fillRoundRect(16, 40, W - 32, 52, 8, rgb565(bgC));
+  EyeShape e = moodShape(NEUTRAL, true);
+  drawEye(W / 2 - 30, 66, e, 0, true, 0.26f, rgb565(eyeC));
+  drawEye(W / 2 + 30, 66, e, 0, false, 0.26f, rgb565(eyeC));
+
+  // input
+  if (touchDown) {
+    colTouched = millis();
+    float dx = touchX - WH_CX, dy = touchY - WH_CY, rr = sqrtf(dx * dx + dy * dy);
+    if (rr <= WH_R + 14) { colH = atan2f(dy, dx) * 180.0f / PI; if (colH < 0) colH += 360; colS = clampf(rr / WH_R, 0, 1); }
+    else if (touchY > SL_Y - 16 && touchY < SL_Y + 30) colV = clampf((touchX - 30) / (float)(W - 60), 0.05f, 1);
+  }
+  bool saveTap = tapEvent && touchY >= SV_Y - 6 && touchY <= SV_Y + SV_H + 6 && obT() > 400;
+  tapEvent = false;
+
+  // wheel as dots on a 7 px grid
+  const int P7 = 7;
+  for (int y = WH_CY - WH_R; y <= WH_CY + WH_R; y += P7)
+    for (int x = WH_CX - WH_R; x <= WH_CX + WH_R; x += P7) {
+      float dx = x - WH_CX, dy = y - WH_CY, rr = sqrtf(dx * dx + dy * dy);
+      if (rr > WH_R) continue;
+      float h = atan2f(dy, dx) * 180.0f / PI;
+      g->fillCircle(x, y, 3, rgb565(hsv2rgb(h, rr / WH_R, colV)));
+    }
+  float mx = WH_CX + cosf(colH * PI / 180) * colS * WH_R, my = WH_CY + sinf(colH * PI / 180) * colS * WH_R;
+  g->fillCircle(mx, my, 9, rgb565(cur)); g->drawCircle(mx, my, 10, UI); g->drawCircle(mx, my, 11, 0x0000);
+
+  // value slider
+  for (int x = 30; x <= W - 30; x += 6) {
+    float v = (x - 30) / (float)(W - 60);
+    g->fillCircle(x, SL_Y + 7, 3, rgb565(hsv2rgb(colH, colS, fmaxf(v, 0.05f))));
+  }
+  int kx = 30 + (int)(colV * (W - 60));
+  g->fillRect(kx - 2, SL_Y - 4, 4, 22, C_ORANGE);
+  label("DARK", 30, SL_Y + 18, UI); label("BRIGHT", W - 30 - 6 * 12, SL_Y + 18, UI);
+
+  // save
+  g->fillRoundRect(40, SV_Y, W - 80, SV_H, 10, C_ORANGE);
+  dotText("SAVE", 99, W / 2, SV_Y + 9, 4, 1.7f, 0x0000, 1, 0, W);
+  label(colStep == 0 ? "STEP 1/2" : "STEP 2/2", W / 2, H - 30, UI, 1);
+  C_INK = savedInk;
+
+  if (saveTap) {
+    if (colStep == 0) {
+      colEyePick = cur; colStep = 1; obT0 = millis();
+      rgb2hsv(customBg[colSlot], colH, colS, colV);
+    } else {
+      customEye[colSlot] = colEyePick; customBg[colSlot] = cur;
+      char k[4];
+      snprintf(k, sizeof(k), "ce%d", colSlot); prefs.putUInt(k, colEyePick);
+      snprintf(k, sizeof(k), "cb%d", colSlot); prefs.putUInt(k, cur);
+      applyThemeId(2 + colSlot); saveTheme();
+      obGo(OB_FINISHED); setMood(HAPPY, 1500); sayText("NEW LOOK!"); lastMotion = millis();
+    }
+  }
+  if (millis() - colTouched > 30000) obGo(OB_FINISHED);   // walked away: keep the old theme
 }
 
 // Clock setting: top third = +, bottom third = -, hold to repeat, middle = next / save.
@@ -1163,7 +1309,7 @@ void pollButton() {
   if (down && downAt && !longFired && millis() - downAt > 2000) { longFired = true; powerOff("GOODNIGHT."); }
   if (!down && downAt) {
     if (!longFired && millis() - downAt > 30 && ob == OB_FINISHED) {
-      applyTheme(!darkMode); prefs.putBool("dark", darkMode);
+      applyTheme(!darkMode); saveTheme();
       sayText(darkMode ? "LIGHTS OFF." : "LIGHTS ON.");
       wake(NEUTRAL);
     }
@@ -1245,7 +1391,13 @@ void setup() {
 
   prefs.begin("doobie", false);
   bool onboarded = prefs.getBool("onb", false) && prefs.isKey("adult");   // re-run if no profile yet
-  applyTheme(prefs.getBool("dark", false));
+  for (int i = 0; i < 3; i++) {
+    char k[4];
+    snprintf(k, sizeof(k), "ce%d", i); customEye[i] = prefs.getUInt(k, customEye[i]);
+    snprintf(k, sizeof(k), "cb%d", i); customBg[i]  = prefs.getUInt(k, customBg[i]);
+  }
+  themeId = prefs.isKey("theme") ? prefs.getUChar("theme", 0) : (prefs.getBool("dark", false) ? 1 : 0);
+  applyThemeId(min((int)themeId, 4));
   brightIdx = min((int)prefs.getUChar("bright", 3), 3);
   focusIdx = min((int)prefs.getUChar("fmin", 2), (int)sizeof(FOCUS_OPTS) - 1);
   breakIdx = min((int)prefs.getUChar("bmin", 1), (int)sizeof(BREAK_OPTS) - 1);
@@ -1301,6 +1453,7 @@ void loop() {
     case OB_DONE:      obDone(); break;
     case OB_SETTINGS:  obSettings(); break;
     case OB_CLOCK:     obClock(); break;
+    case OB_COLOR:     obColor(); break;
     default:
       if (tripleTap) { tripleTap = false; openSettings(); break; }
       tapEvent = false;
