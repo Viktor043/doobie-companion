@@ -66,7 +66,7 @@ The 18+ confirmation is self-declared. Flirty lines are only drawn when it has b
 
 ### Auto-rotate
 
-The QMI8658 tracks which way is up. Hold Doobie upside down for about 0.6 s and the whole view flips 180°: drawing, touch coordinates and eye gaze all follow. It's on by default; toggle it in *Settings → page 2 → ROTATE*. The IMU axes map to the screen as +X = down, +Y = right, +Z = out of the screen. If it flips the wrong way, change `UPRIGHT_SIGN` to `-1.0f`. Landscape isn't supported because every screen is laid out for portrait.
+The QMI8658 tracks which way is up. Hold Doobie upside down, fairly upright (not lying flat) and steady, for 1.5 s, and the whole view flips 180°. Shaking restarts the count, and there is a 3 s cooldown between flips. The drawing, touch coordinates and eye gaze all follow. It's on by default; toggle it in *Settings → page 2 → ROTATE*. The IMU axes map to the screen as +X = down, +Y = right, +Z = out of the screen. If it flips the wrong way, change `UPRIGHT_SIGN` to `-1.0f`. Landscape isn't supported because every screen is laid out for portrait.
 
 ### Charge LEDs
 

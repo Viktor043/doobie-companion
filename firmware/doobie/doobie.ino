@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.7
+//  DOOBIE COMPANION, firmware 1.8
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -35,7 +35,7 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.7"
+#define FW_VERSION "1.8"
 
 void powerOff(const char *msg);
 void wakeScreen();
@@ -815,12 +815,23 @@ void behave(float dt) {
 
   float amag = sqrtf(ax * ax + ay * ay + az * az);
   gravX = approach(gravX, ax, 6, dt); gravY = approach(gravY, ay, 6, dt); gravZ = approach(gravZ, az, 6, dt);
-  if (autoRotate) {                                        // 180 deg auto-rotate, 0.6 s hysteresis
-    static uint32_t flipSince = 0;
-    float up = -UPRIGHT_SIGN * gravX;                      // upright: ax ~ -1 g
-    bool want = flipped ? !(up > 0.55f) : (up < -0.55f);
-    if (want) { if (!flipSince) flipSince = now; if (now - flipSince > 600) { flipped = !flipped; flipSince = 0; lastInteract = now; } }
-    else flipSince = 0;
+  if (autoRotate) {
+    // Deliberate 180-degree auto-rotate. Uses its own slow gravity estimate and
+    // only flips when the device is clearly the other way up, held fairly
+    // upright (not lying flat), steady (no shaking) for 1.5 s, and not within
+    // 3 s of the previous flip.
+    static float orientX = -1, orientZ = 0;
+    static uint32_t flipSince = 0, lastFlip = 0;
+    orientX = approach(orientX, gravX, 1.2f, dt);
+    orientZ = approach(orientZ, gravZ, 1.2f, dt);
+    float up = -UPRIGHT_SIGN * orientX;                    // +1 upright, -1 upside down
+    bool steady = fabsf(amag - 1.0f) < 0.12f && (fabsf(gx) + fabsf(gy) + fabsf(gz)) < 60.0f;
+    bool vertical = fabsf(orientZ) < 0.65f;                 // not lying flat / face up
+    bool otherWay = flipped ? (up > 0.75f) : (up < -0.75f); // ~50 deg past horizontal
+    if (otherWay && vertical && steady && now - lastFlip > 3000) {
+      if (!flipSince) flipSince = now;
+      if (now - flipSince > 1500) { flipped = !flipped; flipSince = 0; lastFlip = now; lastInteract = now; }
+    } else flipSince = 0;                                  // any movement restarts the 1.5 s count
   } else flipped = false;
   {
     const float rsg = flipped ? -1.0f : 1.0f;
