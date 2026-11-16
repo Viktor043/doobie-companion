@@ -68,29 +68,28 @@ The 18+ confirmation is self-declared. Flirty lines are only drawn when it has b
 
 The QMI8658 tracks which way is up. Hold Doobie upside down, fairly upright (not lying flat) and steady, for 1.5 s, and the whole view flips 180°. Shaking restarts the count, and there is a 3 s cooldown between flips. The drawing, touch coordinates and eye gaze all follow. It's on by default; toggle it in *Settings → page 2 → ROTATE*. The IMU axes map to the screen as +X = down, +Y = right, +Z = out of the screen. If it flips the wrong way, change `UPRIGHT_SIGN` to `-1.0f`. Landscape isn't supported because every screen is laid out for portrait.
 
-### Charge LEDs
+### LEDs and the LED mod
 
-The board shows charge state in hardware, and the lights glow through a translucent case:
+**Stock behaviour (V1 board), from the schematic:**
 
-| Red (PWR) | Green (CHG) | Meaning |
-|---|---|---|
-| On | On | Charging |
-| On | Off | Fully charged (or no battery connected) |
-| Off | Off | Running on battery |
+| LED | Wired to | Lit when | Firmware control |
+|---|---|---|---|
+| Red (PWR) | VCC → R3 2.2 kΩ → LED → GND | **Any time the board has power**: USB *or* battery, even in deep sleep. It draws about 1 mA all the time | None |
+| Green (CHG) | VBAT → R22 3 kΩ → LED → ETA6098 STAT | While charging (off when full or with no battery) | None |
 
-The red LED runs from USB 5 V. The green LED is driven by the ETA6098's STAT pin, which isn't wired to the ESP32. To show **FULL** on screen and get an "ALL CHARGED UP!" reaction, fit this mod and set `CHG_SENSE_PIN 7` in `doobie.ino`:
+**LED mod**, which gives firmware control and stops the 1 mA drain. You need two 1 kΩ resistors, a green LED, and fine wire. All the parts are 0402, so use a fine tip and flux.
+1. **Red:** remove **R3** (2.2 kΩ, next to the red LED by the USB-C). Solder a 1 kΩ resistor from **GPIO16** (header pin 16) to R3's *LED-side* pad.
+   - If you only want the red light gone for good, removing R3 is enough.
+2. **Green:** remove **LED2** (the stock green LED). Fit your own green LED: **GPIO17** → 1 kΩ → LED → **GND**.
+3. **Charge sense:** solder a thin wire from **LED2's old cathode pad** (the ETA6098 STAT pin) to **GPIO7**. STAT pulls low while charging. With LED2 gone it floats otherwise, so the firmware reads it with the internal pull-up.
+4. In `doobie.ino`, set `#define LED_MOD 1` and flash.
 
-- STAT (the CHG LED cathode) to a 100 kΩ resistor to GPIO7
-- GPIO7 to a 100 kΩ resistor to GND
-
-**Custom LED behaviour (mod).** The stock LEDs can't be controlled from firmware. Add your own on spare GPIOs, wired GPIO → 1 kΩ → LED → GND, and set `LED_RED_PIN` / `LED_GREEN_PIN` (for example 16 and 17). The firmware then drives them like this:
+After the mod:
 - **Red:** on when USB is plugged in or the battery is below 10 %.
-- **Green:** on only when the battery is full (needs the `CHG_SENSE_PIN` mod above).
-- **Both:** a quick alternating dance when Doobie is super happy (held/petted, a focus round finished, or fully charged).
+- **Green:** on only when the battery is full. The bottom-right label also shows **FULL** and Doobie says "ALL CHARGED UP!".
+- **Both:** a quick alternating dance when Doobie is super happy (held/petted, a focus round done, fully charged).
 
-You can cover or desolder the stock LEDs if their light is distracting.
-
-**Charge current warning (V1 boards):** R11 = 82 kΩ sets the charger to 2 A, far too much for a 150 mAh cell. Replace it with about 1.2 MΩ (~0.14 A). V1.1 boards ship with 360 kΩ (0.5 A).
+**Charge current warning (V1 boards):** R11 = 82 kΩ sets the charger to 2 A, far too much for a 150 mAh cell. Replace it with about 1.2 MΩ (~0.14 A). V1.1 boards ship with 360 kΩ (0.5 A). Do this during the same soldering session.
 
 ### Optional microphone
 

@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.8
+//  DOOBIE COMPANION, firmware 1.9
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -35,7 +35,7 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.8"
+#define FW_VERSION "1.9"
 
 void powerOff(const char *msg);
 void wakeScreen();
@@ -249,31 +249,40 @@ void touchRead() {
 }
 // V1 board: the divider sits on the system rail (VCC), not VBAT. On USB it reads
 // ~4.7 V; on battery VCC = VBAT through the AO3401 power-path FET, so it reads
-// the cell. Charging is done in hardware by the ETA6098 (CHG LED); STAT isn't
-// wired to a GPIO, so "on USB" is the best the firmware can know.
+// the cell. Charging is done in hardware by the ETA6098. Without the LED mod
+// below, STAT isn't wired to a GPIO, so "on USB" is the best the firmware can know.
 float batteryV() { return analogReadMilliVolts(PIN_BAT_ADC) * 3.0f / 1000.0f; }
 float batV = 4.0f; bool onUsb = false;
 
-// Optional charge-status mod: the ETA6098 STAT pin (= cathode of the green CHG
-// LED) isn't wired to the ESP32. Solder STAT -> 100k -> GPIO7 and GPIO7 -> 100k
-// -> GND, then set CHG_SENSE_PIN to 7. STAT pulls low while charging (~0 V) and
-// floats up to VBAT through the LED when done, so the divider reads ~1.5-2.1 V.
-#define CHG_SENSE_PIN  -1          // -1 = mod not fitted
-bool chargeFull = false;
-
-// Optional LED mod. The stock LEDs are hard-wired (red = USB 5 V, green = charger
-// STAT, ON while charging), so firmware can't steer them. Fit your own LEDs
-// (anode -> GPIO via 1k, cathode -> GND) and set the pins:
+// ---- LED mod (V1 board) ----------------------------------------------------
+// Stock wiring (from the schematic):
+//   red LED1   : VCC -> R3 2.2k -> LED -> GND. A power light: on whenever the board
+//                has power (USB or battery, even in deep sleep, ~1 mA). Not a GPIO.
+//   green LED2 : VBAT -> R22 3k -> LED -> ETA6098 STAT. On while charging. Not a GPIO.
+// The mod (see README "LED mod"):
+//   1. Remove R3; 1k from GPIO16 to R3's LED-side pad   -> red under firmware control
+//   2. Remove LED2; green LED + 1k from GPIO17 to GND    -> green under firmware control
+//   3. Wire STAT (LED2's old cathode pad) to GPIO7       -> firmware can read "full"
+// Then set LED_MOD to 1.
 //   red   : on when USB is plugged in or the battery is below 10 %
-//   green : on only when the battery is full (needs the CHG_SENSE_PIN mod)
+//   green : on only when the battery is full
 //   both  : a quick alternating dance when Doobie is super happy
-#define LED_RED_PIN    -1          // e.g. 16
-#define LED_GREEN_PIN  -1          // e.g. 17
+#define LED_MOD 0
+#if LED_MOD
+#define LED_RED_PIN    16
+#define LED_GREEN_PIN  17
+#define CHG_SENSE_PIN   7          // STAT: open-drain, LOW while charging; internal pull-up
+#else
+#define LED_RED_PIN    -1
+#define LED_GREEN_PIN  -1
+#define CHG_SENSE_PIN  -1
+#endif
+bool chargeFull = false;
 uint32_t ledDanceUntil = 0;
 void ledDance(uint32_t ms) { ledDanceUntil = millis() + ms; }
 bool readChargeFull() {
 #if CHG_SENSE_PIN >= 0
-  return analogReadMilliVolts(CHG_SENSE_PIN) > 900;
+  return digitalRead(CHG_SENSE_PIN) == HIGH;    // not charging while on USB = full
 #else
   return false;
 #endif
@@ -1601,6 +1610,9 @@ void setup() {
   pinMode(PIN_BOOT, INPUT_PULLUP);
 #if LED_RED_PIN >= 0
   pinMode(LED_RED_PIN, OUTPUT);
+#endif
+#if CHG_SENSE_PIN >= 0
+  pinMode(CHG_SENSE_PIN, INPUT_PULLUP);
 #endif
 #if LED_GREEN_PIN >= 0
   pinMode(LED_GREEN_PIN, OUTPUT);
