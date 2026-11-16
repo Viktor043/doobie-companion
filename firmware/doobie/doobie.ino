@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.9
+//  DOOBIE COMPANION, firmware 2.0
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -35,7 +35,7 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.9"
+#define FW_VERSION "2.0"
 
 void powerOff(const char *msg);
 void wakeScreen();
@@ -44,7 +44,8 @@ bool screenOff = false;           // screen-sleep (not deep sleep): panel off, t
 uint32_t lastInteract = 0;        // last touch / real movement
 uint32_t lastMove = 0;            // last movement of any size (sensor only)
 bool aodOn = false;               // always-on display
-bool autoRotate = true;           // flip the view 180 deg when held upside down
+#define AUTO_ROTATE_ENABLED 0     // 2.0: disabled (unreliable in practice); set 1 to bring it back
+bool autoRotate = false;          // flip the view 180 deg when held upside down
 bool flipped = false;
 // IMU axes vs screen (measured: upright reads ax ~ -1 g): +X = screen down, +Y = screen right, +Z = out of the screen.
 #define UPRIGHT_SIGN (+1.0f)      // flip to -1 if auto-rotate turns the wrong way
@@ -1312,7 +1313,9 @@ void obSettings() {
     snprintf(brightTxt, sizeof(brightTxt), "BRIGHT %d", (brightIdx + 1) * 25);   // <=10 chars: one line
     items[n] = { brightTxt, "TAP: 25 / 50 / 75 / 100" }; ids[n++] = 14;
     items[n] = { aodOn ? "AOD: ON" : "AOD: OFF", "ALWAYS-ON DISPLAY" }; ids[n++] = 24;
+#if AUTO_ROTATE_ENABLED
     items[n] = { autoRotate ? "ROTATE: ON" : "ROTATE OFF", "FLIP WHEN UPSIDE DOWN" }; ids[n++] = 25;
+#endif
     items[n] = { "PROFILE", "REDO ONBOARDING" }; ids[n++] = 2;
     items[n] = { "POWER OFF", "BOOT WAKES IT" }; ids[n++] = 4;
     items[n] = { "BACK", nullptr }; ids[n++] = 13;
@@ -1660,7 +1663,7 @@ void setup() {
   longIdx  = min((int)prefs.getUChar("lmin", 1), (int)sizeof(LONG_OPTS) - 1);
   pomoAuto = prefs.getBool("pauto", true);
   aodOn = prefs.getBool("aod", false);
-  autoRotate = prefs.getBool("rot", true);
+  autoRotate = AUTO_ROTATE_ENABLED && prefs.getBool("rot", true);
   brightness = brightTarget = userBright(); panel->setBrightness(brightness);
   profSex = prefs.getUChar("sex", 2); profAdult = prefs.getBool("adult", false);
   // 0.3 stored a "spicy" bool; map it: spicy -> 2, otherwise flirty (what 0.3 adults got)

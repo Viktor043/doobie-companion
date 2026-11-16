@@ -2,7 +2,7 @@
 
 A pocket-sized companion with dot-matrix eyes. It runs on a 1.64" AMOLED ESP32-S3 board and reacts to motion, touch and (optionally) sound. It talks back in tiny snippets, quotes and history cards, and has a handful of personalities. A magnetic 3D-printed case lets it clip onto wearables or a hairband, and the case has a hidden keyring bar.
 
-**Firmware 1.9** · Arduino / ESP32-S3 · 280×456 AMOLED · ~1,500 lines of things to say
+**Firmware 2.0** · Arduino / ESP32-S3 · 280×456 AMOLED · ~1,500 lines of things to say
 
 ---
 
@@ -105,7 +105,6 @@ python3 tools/timesync.py /dev/cu.usbmodemXXXX      # flashing resets the clock
 | **Long, hard shake** | Dizzy spirals, then grumpy |
 | **Bump / drop** | Surprised / panic |
 | **Face down** | Annoyed |
-| **Upside down, held steady 1.5 s** | The view rotates 180° |
 | **Screen off: double-tap, 3 firm shakes, or BOOT** | Wakes up |
 | **BOOT short press** | Toggles light/dark, or wakes the screen |
 | **BOOT hold 2 s** | Power off (deep sleep); BOOT or RST turns it back on |
@@ -131,7 +130,7 @@ Open with **4 taps within 1 s**. Rows are tiles: tap one to pick it, or tilt to 
 | Page | Rows |
 |---|---|
 | **1/2** | **FOCUS…** · **TIME** (set the clock) · **THEME…** · **ATTITUDE…** · MORE… · EXIT |
-| **2/2** | **BRIGHT** 25/50/75/100 · **AOD** on/off · **ROTATE** on/off · PROFILE (redo onboarding) · POWER OFF · BACK |
+| **2/2** | **BRIGHT** 25/50/75/100 · **AOD** on/off · PROFILE (redo onboarding) · POWER OFF · BACK |
 | **FOCUS** | START/STOP · FOCUS 15–50 min · BREAK 3/5/10 · LONG 10/15/20/30 · AUTO on/off · BACK |
 | **THEME** | LIGHT · DARK · CUSTOM 1 · CUSTOM 2 · CUSTOM 3 · BACK |
 | **ATTITUDE** (2 pages) | PET · CUTE · QUOTES · EVENTS · BOSSY · REFINED · BALKAN |
@@ -167,7 +166,7 @@ Open with **4 taps within 1 s**. Rows are tiles: tap one to pick it, or tilt to 
 - **Idle life:** blinks (sometimes doubled), glances, eye-rolls, winks, cross-eyes and suspicious side-eye.
 - **Gaze:** left/right follows tilt. Up/down is relative to how you're holding Doobie and re-centres after a few seconds.
 - **Jelly eyes:** linear acceleration drives a bouncy spring. The effect starts at ~0.35 g and is at full strength by 1.1 g. Eyes that hit an edge squash (down to 30 %), the other eye piles in, and the squashed axis bulges the other way.
-- **Auto-rotate:** flips 180° only when Doobie is clearly upside down (~50°), held fairly vertical (not flat) and steady for 1.5 s, with a 3 s cooldown. Drawing, touch and gaze all follow. If it flips the wrong way, set `UPRIGHT_SIGN` to `-1.0f`. Landscape isn't supported.
+- **Auto-rotate:** **disabled in 2.0** because it rotated unexpectedly in practice. The view always stays upright. The code is still there (180° flip of drawing, touch and gaze after a steady 1.5 s upside down); set `AUTO_ROTATE_ENABLED 1` to bring it back along with its settings row.
 
 ---
 
@@ -290,7 +289,7 @@ The BOM, print settings, magnet polarity and assembly steps are in `cad/README.m
 - **Touch direction:** the touch X axis hasn't been fully confirmed on hardware (it matters for the colour wheel). If the selection marker moves mirrored, flip X in `touchRead()`.
 - **Clock:** lost on RST or a battery disconnect. Wi-Fi/NTP sync would fix that and isn't implemented.
 - **LEDs:** firmware control and "battery full" need the LED mod.
-- **Display:** landscape isn't supported.
+- **Display:** auto-rotate is disabled and landscape isn't supported.
 - **Battery life:** not measured. Roughly 1.5–2 h with the screen always on; much longer with screen sleep.
 
 ---
@@ -310,3 +309,4 @@ The BOM, print settings, magnet polarity and assembly steps are in `cad/README.m
 | 1.6 | Jelly eyes |
 | 1.7–1.8 | Correct IMU axes, deliberate auto-rotate, shake to wake |
 | 1.9 | Corrected LED wiring analysis; single-switch `LED_MOD` |
+| 2.0 | Auto-rotate disabled (random flips); ROTATE row hidden |
