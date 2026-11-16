@@ -1,134 +1,312 @@
 # Doobie Companion
 
-A pocket-sized companion with dot-matrix eyes. It runs on a 1.64" AMOLED ESP32-S3 board, reacts to motion and touch, and talks back in tiny snippets. The 3D-printed case has two magnets, so it clips onto wearables, plus a hidden keyring bar.
+A pocket-sized companion with dot-matrix eyes. It runs on a 1.64" AMOLED ESP32-S3 board and reacts to motion, touch and (optionally) sound. It talks back in tiny snippets, quotes and history cards, and has a handful of personalities. A magnetic 3D-printed case lets it clip onto wearables or a hairband, and the case has a hidden keyring bar.
+
+**Firmware 1.9** · Arduino / ESP32-S3 · 280×456 AMOLED · ~1,500 lines of things to say
+
+---
+
+## Contents
+
+- [Repository](#repository)
+- [Hardware](#hardware)
+- [Build and flash](#build-and-flash)
+- [Using Doobie](#using-doobie)
+- [Settings](#settings)
+- [Personality](#personality)
+- [Eyes and reactions](#eyes-and-reactions)
+- [Themes](#themes)
+- [Clock and pomodoro](#clock-and-pomodoro)
+- [Power and battery](#power-and-battery)
+- [LEDs and the LED mod](#leds-and-the-led-mod)
+- [Optional microphone](#optional-microphone)
+- [Case and hairband](#case-and-hairband)
+- [Tools](#tools)
+- [Known limitations](#known-limitations)
+- [Version history](#version-history)
+
+---
+
+## Repository
+
+| Path | What's in it |
+|---|---|
+| `firmware/doobie/doobie.ino` | Main sketch: display, sensors, behaviour, onboarding, settings, power |
+| `firmware/doobie/phrases.h` | Reaction lines by event and tier (base, pet, kid, adult) |
+| `firmware/doobie/chars.h` | Character packs (Bossy, Refined, Balkan). **Generated, don't edit** |
+| `firmware/doobie/quotes.h` | 311 quotes and 421 dated history events |
+| `firmware/doobie/eyetypes.h` | Shared types: moods, onboarding steps, menu choices |
+| `tools/gen_chars.py` | Source of the character lines; writes `chars.h` |
+| `tools/timesync.py` | Sets Doobie's clock from your computer over USB |
+| `tools/eyes-sim.html` | Browser preview of the eye engine (early 0.2 look) |
+| `cad/` | Case and hairband (CadQuery), STEP/STL/3MF, renders, `cad/README.md` |
+
+---
 
 ## Hardware
 
 | Part | Detail |
 |---|---|
-| Board | Waveshare ESP32-S3-Touch-AMOLED-1.64 (V1) |
+| Board | Waveshare **ESP32-S3-Touch-AMOLED-1.64**, V1 (V1.1 auto-detected) |
 | MCU | ESP32-S3R8, 16 MB flash, 8 MB OPI PSRAM |
-| Display | 280x456 AMOLED over QSPI (CO5300 command set, 20 px column offset) |
-| Motion | QMI8658 6-axis IMU at I2C 0x6B |
-| Touch | FT3168 at I2C 0x38 |
-| Power | EEMB LP401730 LiPo (3.7 V, 150 mAh, 4x17x30 mm) on the JST 1.25 BAT socket; voltage on GPIO4 (1:3 divider) |
+| Display | 280×456 AMOLED, QSPI, CO5300 command set, 20 px column offset |
+| Motion | QMI8658 6-axis IMU, I2C 0x6B |
+| Touch | FT3168, I2C 0x38 (kept in active mode: reg 0x86 = 0) |
+| Battery | EEMB **LP401730**, 3.7 V 150 mAh, 4×17×30 mm, JST 1.25 on the BAT socket |
+| Charger | ETA6098, hardware-controlled. **See the charge-current warning below** |
 | Buttons | BOOT (GPIO0), RST |
+| Clock | No RTC chip; uses the ESP32's own timer |
+| Mic | None on board. Optional PDM add-on |
 
-Pins: QSPI CS 9, CLK 10, D0-D3 11-14, LCD RST 21, I2C SDA 47 / SCL 48. The V1.1 board moved LCD CS to GPIO46.
+**Pins:**
 
-## Firmware
+| Function | Pins |
+|---|---|
+| QSPI | CS 9 (V1.1: 46), CLK 10, D0–D3 11–14 |
+| LCD reset | 21 |
+| I2C | SDA 47, SCL 48 |
+| Battery ADC | 4 |
+| Optional mic | CLK 5, DAT 6 |
+| LED mod | red 16, green 17, STAT 7 |
 
-`firmware/doobie/` is an Arduino sketch.
+**Board quirks:**
+- **Revision detection:** V1.1 has a 4.7 k pull-up on GPIO18 (touch interrupt). The firmware probes for it at boot and picks LCD CS 9 or 46.
+- **Battery sense:** on V1 the battery-sense divider sits on VCC, not the battery. It reads ~4.7 V on USB, and the firmware uses that to detect USB power. On battery it reads the cell.
+- **IMU axes vs screen:** +X = down, +Y = right, +Z = out of the screen.
+
+---
+
+## Build and flash
 
 ```sh
 arduino-cli core install esp32:esp32@3.1.3
 arduino-cli lib install "GFX Library for Arduino@1.5.6"
 FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,CDCOnBoot=cdc,PartitionScheme=app3M_fat9M_16MB"
 arduino-cli compile -b "$FQBN" firmware/doobie
-arduino-cli upload  -b "$FQBN" -p /dev/cu.usbmodem* firmware/doobie
+arduino-cli upload  -b "$FQBN" -p /dev/cu.usbmodemXXXX firmware/doobie
+python3 tools/timesync.py /dev/cu.usbmodemXXXX      # flashing resets the clock
 ```
 
-### What it does
+- **Character lines:** after editing them, run `python3 tools/gen_chars.py`. It refuses to write unless each character has exactly 200 lines, all ASCII, ≤36 characters, with no duplicates.
+- **Serial log:** 115200 baud. It prints the board revision, I2C scan, last reset reason, profile, free memory and microphone status at boot, then a status line every 0.5 s.
+- **Memory use:** ~595 KB of the 3 MB app slot (18 %), 316 KB internal RAM free, 6.9 MB PSRAM free. The 9.9 MB FAT partition is unused.
 
-- **Onboarding on first boot.** A dot grid sweeps on, the wordmark types in, the eyes open and say hello. You pick **light** (bright teal, grainy) or **dark** (inverted to near-black, so most pixels are off and the battery lasts longer). Then it walks you through *tilt me* and *tap me*. The choice is saved in NVS.
-- **Eyes** are signed-distance shapes sampled on a 9 px dot grid. The edges render as halftone dots, so moods blend smoothly.
-- **Reactions:**
+---
 
-| You do | It does |
+## Using Doobie
+
+| Gesture | Effect |
 |---|---|
-| Tilt | Eyes follow the low side |
-| Shake | Dizzy spirals, then grumpy |
-| Bump | Surprised |
-| Drop | Panic |
-| Turn it upside down | Annoyed |
-| Tap | Happy face and blush |
-| Hold | Hearts |
-| Leave it still for 20 s / 45 s | Sleepy / asleep (dims) |
+| **Tap** | Happy squint and blush (it replies about 2 times in 3) |
+| **Hold** (0.7 s) | Hearts, and the LED dance with the mod |
+| **4 taps within 1 s** | Opens settings |
+| **Tilt** | Eyes look toward the low side |
+| **Jerk or wiggle hard** | Jelly eyes: they lag, squash against the edges and bounce back |
+| **Long, hard shake** | Dizzy spirals, then grumpy |
+| **Bump / drop** | Surprised / panic |
+| **Face down** | Annoyed |
+| **Upside down, held steady 1.5 s** | The view rotates 180° |
+| **Screen off: double-tap, 3 firm shakes, or BOOT** | Wakes up |
+| **BOOT short press** | Toggles light/dark, or wakes the screen |
+| **BOOT hold 2 s** | Power off (deep sleep); BOOT or RST turns it back on |
 
-- **Profile questions** during onboarding: *he / she / skip*, then an attitude: *Pet*, *Bossy*, *Refined* or *Balkan*. There's no age question. Cute (mildly flirty) is only in settings, behind a one-time **I'M 18+** confirmation. Redoing onboarding locks it again. There is no spicy content.
-- **Jelly eyes:** jerk or wiggle Doobie and the eyes lag behind the motion like loose jelly. They slam into the screen edge, squash flat, bulge sideways and wobble back. When the first eye is squished, the second piles into it. Only hard wiggles trigger it (it starts at about 0.35 g and is at full strength by 1.1 g). Normal tilting just moves the gaze. Vertical gaze is measured relative to how you're holding Doobie and re-centres after a few seconds.
-- **Speech:** about 400 short lines (`phrases.h`), typed out in a 5x7 dot font and dissolved away. Lines come in tiers (base, kid, pet, adult), and `{N}` is swapped for a pet name that suits the profile. It avoids repeating recent lines and makes the odd unprompted remark.
-- **Mic reactions (optional add-on):** claps, bangs, sustained noise, music or a party, chatter and long silences each get their own lines, and the eyes bounce with loudness.
-- **Power saving** for the 150 mAh cell: about 12 fps while asleep, the panel switches off after 5 minutes asleep, and motion wakes it.
+### Onboarding
 
-### User journeys
+This runs on first boot, or from *Settings → Profile*:
+1. **Boot:** a dot grid sweeps on and the DOOBIE wordmark types in.
+2. **Hello:** the eyes open and introduce themselves.
+3. **01 Mode:** light or dark.
+4. **02 Who are you?** He / she / skip. This only affects pet names.
+5. **03 Attitude:** Pet / Bossy / Refined / Balkan.
+6. **04 Tilt me**, then **05 Tap me**.
 
-| Attitude | Where to pick it | Pet names | Lines it can say |
+There's no age question. Everything is saved in NVS.
+
+---
+
+## Settings
+
+Open with **4 taps within 1 s**. Rows are tiles: tap one to pick it, or tilt to move the highlight. The menu closes after 10 s idle, and every value is saved.
+
+| Page | Rows |
+|---|---|
+| **1/2** | **FOCUS…** · **TIME** (set the clock) · **THEME…** · **ATTITUDE…** · MORE… · EXIT |
+| **2/2** | **BRIGHT** 25/50/75/100 · **AOD** on/off · **ROTATE** on/off · PROFILE (redo onboarding) · POWER OFF · BACK |
+| **FOCUS** | START/STOP · FOCUS 15–50 min · BREAK 3/5/10 · LONG 10/15/20/30 · AUTO on/off · BACK |
+| **THEME** | LIGHT · DARK · CUSTOM 1 · CUSTOM 2 · CUSTOM 3 · BACK |
+| **ATTITUDE** (2 pages) | PET · CUTE · QUOTES · EVENTS · BOSSY · REFINED · BALKAN |
+
+**Setting the time:** tap the top third of the screen for +, the bottom third for −, and hold to repeat. Tap the middle for hours → minutes → save.
+
+---
+
+## Personality
+
+| Attitude | How it talks | Calls you | Lines |
 |---|---|---|---|
-| Pet | Onboarding or settings | BUDDY, CHAMP, FRIEND… | Base, pet attitude ("FEED ME?", "*PURR*") and a little encouragement |
-| Bossy / Refined / Balkan | Onboarding or settings | Character-specific (INTERN / GOOD SIR, MY LADY / BRATE, SESTRO) | 200 character lines each, plus base |
-| Quotes / Events | Settings | — | Base, plus quote cards or history cards |
-| Cute | Settings, after **I'M 18+** | He: HANDSOME… / She: GORGEOUS… / Skip: CUTIE… | Base, plus flirty lines ("OH, NICE FINGER.") |
+| **Pet** | Cat and dog energy: "FEED ME?", "*PURR*", "I'M THE BOSS." | HUMAN, BUDDY, PAL | Base, pet and a little encouragement |
+| **Bossy** | A CEO with a stopwatch: "CHOP CHOP.", "PER MY LAST MESSAGE…" | INTERN, ROOKIE | 200 + base |
+| **Refined** | Victorian English: "GOOD HEAVENS!", "MILK FIRST? SCANDAL." | GOOD SIR / MY LADY / DEAR FRIEND | 200 + base |
+| **Balkan** | Rowdy, friendly, laid back: "AJDE, COFFEE?", "PROMAJA WILL KILL US!" | BRATE / SESTRO / LEGENDO | 200 + base |
+| **Quotes** | Every idle remark becomes a quote card | — | 311 quotes |
+| **Events** | Every idle remark becomes a history card ("THIS MONTH IN 1989" when the clock is set) | — | 421 events |
+| **Cute** | Mildly flirty: "OH, NICE FINGER.", "I LIKE THAT." | HANDSOME / GORGEOUS / CUTIE | Base + flirty. **Settings only, after a one-time "I'M 18+" confirmation** |
 
-The 18+ confirmation is self-declared. Flirty lines are only drawn when it has been given (`pickPool()`). The spicy tier was removed in 1.2.
+- **Kid-friendly by default.** The spicy tier was removed in 1.2. Cute is the only adult-leaning option. It sits behind a self-declared 18+ confirmation, and redoing onboarding locks it again.
+- **Situational lines:** morning (6–10) and night (22–05) lines, USB plug/unplug, low battery, focus/break, and microphone reactions.
+- **Pacing:** idle remarks come every 28–69 s, or 20–45 s in card modes. Low-stakes chatter waits 2.5 s after the previous message, and recently used lines aren't repeated.
+- **Cards:** for a quote or event, the eyes shrink smoothly into the bottom third and the text fills the top two thirds at the largest font that fits. All 732 layouts were simulated with no overflow.
+- **Accuracy:** quotes and dates were written from memory and not checked against sources. Known misattributions were left out. Corrections go in `quotes.h`.
 
-**Pacing:** idle remarks come every 28-69 s. Taps get a spoken reply about two times in three. Low-stakes reactions wait 2.5 s after the previous message, and the eyes stay below the text while Doobie is talking.
+---
 
-### Auto-rotate
+## Eyes and reactions
 
-The QMI8658 tracks which way is up. Hold Doobie upside down, fairly upright (not lying flat) and steady, for 1.5 s, and the whole view flips 180°. Shaking restarts the count, and there is a 3 s cooldown between flips. The drawing, touch coordinates and eye gaze all follow. It's on by default; toggle it in *Settings → page 2 → ROTATE*. The IMU axes map to the screen as +X = down, +Y = right, +Z = out of the screen. If it flips the wrong way, change `UPRIGHT_SIGN` to `-1.0f`. Landscape isn't supported because every screen is laid out for portrait.
+- **Rendering:** the eyes are signed-distance shapes sampled on a 9 px dot grid, so their edges render as halftone dots. Moods blend by tweening the shape (size, corner radius, lids, slant), and the gaze moves on a spring.
+- **Moods:** neutral, happy, sleepy, angry, sad, surprised, suspicious, panic, focus. There are also hearts, dizzy spirals and sleeping lines.
+- **Idle life:** blinks (sometimes doubled), glances, eye-rolls, winks, cross-eyes and suspicious side-eye.
+- **Gaze:** left/right follows tilt. Up/down is relative to how you're holding Doobie and re-centres after a few seconds.
+- **Jelly eyes:** linear acceleration drives a bouncy spring. The effect starts at ~0.35 g and is at full strength by 1.1 g. Eyes that hit an edge squash (down to 30 %), the other eye piles in, and the squashed axis bulges the other way.
+- **Auto-rotate:** flips 180° only when Doobie is clearly upside down (~50°), held fairly vertical (not flat) and steady for 1.5 s, with a 3 s cooldown. Drawing, touch and gaze all follow. If it flips the wrong way, set `UPRIGHT_SIGN` to `-1.0f`. Landscape isn't supported.
 
-### LEDs and the LED mod
+---
 
-**Stock behaviour (V1 board), from the schematic:**
+## Themes
 
-| LED | Wired to | Lit when | Firmware control |
+- **Built-in:** **Light** (bright teal gradient, film grain, a faint unlit dot grid) and **Dark** (the same, near-black, so most AMOLED pixels are off).
+- **Custom 1–3:** a two-step editor.
+  1. **Pick eye color:** a live preview, a dot-art colour wheel (hue around, saturation outward), a dark-to-bright slider, then SAVE.
+  2. **Pick background:** the same layout, then SAVE, which stores and applies the theme.
+
+  Custom backgrounds get the same gradient, glow, grain and dot grid.
+
+---
+
+## Clock and pomodoro
+
+- **Clock:** there's no RTC, so the ESP32 keeps time. It runs through screen sleep and deep sleep, but **RST, flashing or a battery disconnect** lose it.
+  - **Setting it:** in settings, or with `tools/timesync.py`.
+  - **Display:** bottom-left of the main view.
+- **Pomodoro:** focus / break / long break every 4th round, all configurable, plus Auto-continue.
+  - **During focus:** the eyes take on a determined squint, Doobie stays quiet and awake, and taps get "SHH. FOCUS.".
+  - **Display:** `FOCUS mm:ss` with a shrinking orange bar.
+  - **Transitions:** each change is announced and wakes the screen.
+
+---
+
+## Power and battery
+
+| State | What's on | How it's entered | How it's left |
 |---|---|---|---|
-| Red (PWR) | VCC → R3 2.2 kΩ → LED → GND | **Any time the board has power**: USB *or* battery, even in deep sleep. It draws about 1 mA all the time | None |
-| Green (CHG) | VBAT → R22 3 kΩ → LED → ETA6098 STAT | While charging (off when full or with no battery) | None |
+| **Awake** | Everything, ~30 fps | — | — |
+| **Screen sleep** | Panel off, CPU at 80 MHz, touch and IMU polled, clock and timers run | 30 s with no touch, **no movement**, and nothing being said (it never cuts off mid-sentence) | Double-tap, 3 firm shakes, BOOT, a focus/break change |
+| **AOD** (setting) | Screen never turns off; Doobie dozes dim with "zzz" | Settings → AOD | Any motion or tap |
+| **Deep sleep** ("off") | Almost nothing | BOOT hold 2 s, Settings → Power off, or automatically below 3.3 V | BOOT or RST |
 
-**LED mod**, which gives firmware control and stops the 1 mA drain. You need two 1 kΩ resistors, a green LED, and fine wire. All the parts are 0402, so use a fine tip and flux.
-1. **Red:** remove **R3** (2.2 kΩ, next to the red LED by the USB-C). Solder a 1 kΩ resistor from **GPIO16** (header pin 16) to R3's *LED-side* pad.
-   - If you only want the red light gone for good, removing R3 is enough.
-2. **Green:** remove **LED2** (the stock green LED). Fit your own green LED: **GPIO17** → 1 kΩ → LED → **GND**.
-3. **Charge sense:** solder a thin wire from **LED2's old cathode pad** (the ETA6098 STAT pin) to **GPIO7**. STAT pulls low while charging. With LED2 gone it floats otherwise, so the firmware reads it with the internal pull-up.
-4. In `doobie.ino`, set `#define LED_MOD 1` and flash.
+- **Charging:** the ETA6098 charges over USB-C in hardware, including while Doobie is off.
+- **Display:** the bottom-right label shows **USB** (or **FULL** with the LED mod) when plugged in, and the battery % otherwise.
+- **Battery %:** only meaningful on battery, because V1 can't measure the cell while on USB.
 
-After the mod:
+> ⚠️ **Charge current (V1 boards):** R11 = 82 kΩ sets the ETA6098 to **2 A**, roughly 13C for the 150 mAh cell. Replace R11 with **~1.2 MΩ (~0.14 A)**. V1.1 boards ship with 360 kΩ (0.5 A). Until then, only charge while you're around, and unplug it if the cell gets warm.
+
+---
+
+## LEDs and the LED mod
+
+**Stock wiring (V1), from the schematic.** Neither LED is connected to a GPIO, so firmware cannot change them:
+
+| LED | Wired to | Lit when |
+|---|---|---|
+| Red (PWR) | VCC → R3 2.2 kΩ → LED → GND | **Whenever the board has power** (USB or battery, even in deep sleep). Draws ~1 mA constantly |
+| Green (CHG) | VBAT → R22 3 kΩ → LED → ETA6098 STAT | While charging |
+
+**The mod.** Parts are 0402, so use a fine tip and flux:
+1. **Red:** remove **R3**. Solder 1 kΩ from **GPIO16** to R3's LED-side pad.
+   - Removing R3 alone just kills the red light and its 1 mA drain.
+2. **Green:** remove **LED2**. Fit **GPIO17 → 1 kΩ → green LED → GND**.
+3. **Charge sense:** wire **LED2's old cathode pad (STAT)** to **GPIO7**. The firmware reads it with the internal pull-up.
+4. Set `#define LED_MOD 1` in `doobie.ino` and flash.
+
+Swap R11 during the same session.
+
+**Behaviour after the mod:**
 - **Red:** on when USB is plugged in or the battery is below 10 %.
-- **Green:** on only when the battery is full. The bottom-right label also shows **FULL** and Doobie says "ALL CHARGED UP!".
-- **Both:** a quick alternating dance when Doobie is super happy (held/petted, a focus round done, fully charged).
+- **Green:** on only when the battery is full ("ALL CHARGED UP!").
+- **Both:** a quick alternating dance when Doobie is super happy (held, a focus round done, fully charged).
 
-**Charge current warning (V1 boards):** R11 = 82 kΩ sets the charger to 2 A, far too much for a 150 mAh cell. Replace it with about 1.2 MΩ (~0.14 A). V1.1 boards ship with 360 kΩ (0.5 A). Do this during the same soldering session.
+---
 
-### Optional microphone
+## Optional microphone
 
-The board has no mic. Wire an Adafruit PDM MEMS mic breakout (#3492, MP34DT01-M):
+Wire an Adafruit PDM MEMS mic breakout (#3492, MP34DT01-M). The case rev B has a pocket and sound port for it.
 
-| Mic pin | Board pin |
+| Mic | Board |
 |---|---|
 | 3V | 3V3 |
 | GND | G |
 | CLK | GPIO5 |
 | DAT | GPIO6 |
 
-The firmware detects it at boot; the serial log shows `Mic: detected`. The level thresholds (`MIC_*_DB`) are first guesses based on the mic's datasheet sensitivity, so tune them against the `mic=…dB` value in the serial log.
-- **Settings:** tap the screen **4 times within 1 second**. Page 1 has Focus, Time, Theme and Attitude, each opening its own submenu. Page 2 has Brightness (25 / 50 / 75 / 100 %, saved), AOD (always-on display), Rotate, Profile (redo onboarding), Power off and Back. Exit is on page 1. The menu closes on its own after 10 s idle.
-- **Attitude:** *Settings → Attitude…* picks how Doobie talks:
-  - **Pet:** cat/dog attitude, no flirting.
-  - **Cute:** charming, never rude (18+).
-  - **Quotes:** every idle remark becomes a quote card, chosen from 311 short quotes by famous people with the attribution in orange.
-  - **Events:** every idle remark becomes a history card, chosen from 421 events, each with its month and year. When the clock is set, it prefers "THIS MONTH IN 19xx".
+The firmware detects it at boot (`Mic: detected` / `Mic: none`) and reacts like this:
+- **Claps and bangs:** startled.
+- **Loud for 3 s:** "TOO LOUD!".
+- **Loud for 9 s or more:** party mode.
+- **Chatter:** "WHO'S TALKING?".
+- **30 s of silence:** quiet lines.
+- **Eyes:** bounce with loudness.
 
-  - **Bossy:** a CEO with a stopwatch ("CHOP CHOP.", "PER MY LAST MESSAGE...", "DON'T DENT THE CEO."). Calls you INTERN.
-  - **Refined:** Victorian English ("GOOD HEAVENS!", "FETCH THE SMELLING SALTS!", "MILK FIRST? SCANDAL."). Calls you GOOD SIR, MY LADY or DEAR FRIEND.
-  - **Balkan:** rowdy, friendly, laid back, with charming grammar ("AJDE, COFFEE?", "PROMAJA WILL KILL US!", "YOU TAP LIKE MY BABA."). Calls you BRATE, SESTRO or LEGENDO.
+The thresholds (`MIC_*_DB`) are datasheet-based first guesses, so tune them against `mic=…dB` in the log. On arduino-esp32 3.1 with PSRAM, the I2S driver has to be initialised while PSRAM is briefly reserved; that's already handled in `micInit()`.
 
-  Each character has 200 lines covering every reaction, generated from `tools/gen_chars.py` (edit the lines there, then run it). The attitude menu is split across two pages. Cute needs the 18+ confirmation. Picking Quotes or Events shows a sample straight away. The content lives in `firmware/doobie/quotes.h`.
-- **Cards:** while a quote or event shows, the eyes shrink smoothly into the bottom third of the screen. The text fills the top two thirds at the largest font that fits. In Quotes and Events mode Doobie stays awake about 4x longer when it's still. The first card arrives about 15 s after boot, then one every 20-45 s.
-- **Themes:** *Settings → Theme…* offers Light, Dark and Custom 1–3 (the active one is marked with `>`). Tapping a custom slot opens a two-step editor. First *Pick eye color*: a live preview, a dot-art colour wheel (hue around, saturation outward), a dark-to-bright slider, then SAVE. Then *Pick background* the same way, and SAVE stores and applies the theme. Custom backgrounds get the same gradient, glow, grain and dot grid as the built-in themes. Pick a near-black background to save battery. A short press on BOOT still flips between light and dark.
-- **Clock:** the board has no RTC chip, so the time comes from the ESP32's own timer. It keeps running through deep sleep, but disconnecting the battery or pressing RST loses it. Set the time in *Settings → Time* (top third of the screen = +, bottom third = −, hold to repeat, tap the middle for next / save), or run `python3 tools/timesync.py /dev/cu.usbmodem…` over USB. The time shows in the bottom-left corner. Mornings (6–10) bring morning lines; nights (22–05) bring bedtime lines, and Doobie gets sleepy twice as fast.
-- **Pomodoro:** *Settings → Focus…* opens a submenu with Start/Stop, focus length (15/20/25/30/45/50 min), break length (3/5/10), long break every 4th round (10/15/20/30), and Auto (whether the next round starts by itself after a break). All of these are saved. The defaults are 25 / 5 / 15 with Auto on. During focus the eyes squint, it stays quiet and awake, and taps get a "SHH. FOCUS.". The bottom-left shows `FOCUS mm:ss` over a shrinking orange bar. It announces each break and each return to work. Stop it from the submenu.
-- **Screen sleep:** after 30 s with no touch and no movement of any kind, the screen fades out and turns off. It never switches off mid-sentence; it waits until 3 s after a message has finished. The chip drops to 80 MHz but keeps the clock and focus timer running. **Double-tap the screen**, give it **a few firm shakes**, or press BOOT to wake it, and the eyes open up. A focus/break change also wakes it.
-- **Always-on display:** *Settings → page 2 → AOD* keeps the screen on. Instead of switching off, Doobie gets sleepy and dozes dim with "zzz".
-- **On/off:** hold BOOT for 2 s, or pick *Power off* in settings. It says goodnight, its eyes close, the picture collapses like an old TV, and it goes into deep sleep. Press BOOT (or RST) to turn it back on. It also switches itself off below 3.3 V on battery to protect the cell. While it's off, the battery still charges over USB.
-- **BOOT button:** a short press toggles light and dark.
-- **Board revision:** V1 and V1.1 are detected at boot (V1.1 has a pull-up on GPIO18) and the LCD CS pin is set to match. The boot log also prints an I2C scan.
+---
 
-## Case
+## Case and hairband
 
-`cad/` holds a parametric CadQuery model with STEP, STL and 3MF exports. See `cad/README.md` for the parts list and print settings.
+`cad/` holds the parametric CadQuery models (`case.py`, `hairband.py`), STEP/STL/3MF exports and renders.
 
-## Simulator
+- **Case rev B:** 32.7 × 47.6 × 15.7 mm.
+  - **Mounting:** screws to the board's brass standoffs with 4 × M2×8 button heads.
+  - **Battery:** LP401730 pocket, plus a mic shelf with a sound port.
+  - **Magnets:** two Ø6×3 N52 magnets on SOLDR's 30 mm pitch, hidden behind 0.3 mm skins.
+  - **Keyring:** a 2 mm bar on the back.
+  - **Openings:** USB-C, RST and BOOT access.
+- **Hairband:** prints flat (140 × 199 mm). A fin with matching magnets holds Doobie upright, and a ledge supports the case's bottom corners.
+- **Material:** Bambu **translucent PETG** on the P1S, for both parts.
 
-`tools/eyes-sim.html` runs the eye engine in a browser: tilt pad, sensor-event buttons, and click or hold on the screen.
+The BOM, print settings, magnet polarity and assembly steps are in `cad/README.md`.
+
+---
+
+## Tools
+
+- **`gen_chars.py`:** edit the character lines (`BOSSY`, `POSH` → shown as REFINED, `BALKAN`), then run it to regenerate `chars.h`.
+- **`timesync.py <port>`:** sends `T<local epoch>` over serial. The firmware also accepts that command from any serial terminal.
+- **`eyes-sim.html`:** a browser simulator of the early (0.2) eye engine: tilt pad, sensor buttons, and tap/hold.
+  - **Not covered:** the current menus, cards and characters.
+
+---
+
+## Known limitations
+
+- **Touch direction:** the touch X axis hasn't been fully confirmed on hardware (it matters for the colour wheel). If the selection marker moves mirrored, flip X in `touchRead()`.
+- **Clock:** lost on RST or a battery disconnect. Wi-Fi/NTP sync would fix that and isn't implemented.
+- **LEDs:** firmware control and "battery full" need the LED mod.
+- **Display:** landscape isn't supported.
+- **Battery life:** not measured. Roughly 1.5–2 h with the screen always on; much longer with screen sleep.
+
+---
+
+## Version history
+
+| Version | Highlights |
+|---|---|
+| 0.2 | Dot-art eyes, grainy teal theme, onboarding, light/dark |
+| 0.3 | Profile journeys, tiered phrases, optional mic, USB detection |
+| 0.4–0.5 | Measured tile layout, pet attitude, clock, pomodoro, 4-tap settings |
+| 0.6–0.8 | Brightness, focus submenu, custom themes with a colour wheel |
+| 0.9–1.0 | Attitude menu: quotes, events, and the Bossy / Refined / Balkan characters |
+| 1.1 | Age question removed; Cute behind an 18+ confirmation |
+| 1.2 | Big quote/event cards with shrinking eyes; spicy removed; EXQUISITE renamed REFINED |
+| 1.3–1.5 | Screen sleep after 30 s, double-tap wake, AOD, fix for instant screen-off |
+| 1.6 | Jelly eyes |
+| 1.7–1.8 | Correct IMU axes, deliberate auto-rotate, shake to wake |
+| 1.9 | Corrected LED wiring analysis; single-switch `LED_MOD` |
