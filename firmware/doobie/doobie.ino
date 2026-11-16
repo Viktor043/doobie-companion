@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.6
+//  DOOBIE COMPANION, firmware 1.7
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -35,7 +35,7 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.6"
+#define FW_VERSION "1.7"
 
 void powerOff(const char *msg);
 void wakeScreen();
@@ -46,7 +46,10 @@ uint32_t lastMove = 0;            // last movement of any size (sensor only)
 bool aodOn = false;               // always-on display
 bool autoRotate = true;           // flip the view 180 deg when held upside down
 bool flipped = false;
-#define UPRIGHT_SIGN (+1.0f)      // gravity on +Y when held upright; flip to -1 if rotation is backwards
+// IMU axes vs screen (measured: upright reads ax ~ -1 g): +X = screen down, +Y = screen right, +Z = out of the screen.
+#define UPRIGHT_SIGN (+1.0f)      // flip to -1 if auto-rotate turns the wrong way
+float tiltSX = 0, tiltSY = 0;     // screen-space tilt: +x = right side low, +y = bottom low (relative)
+float baseDown = 0;               // slow baseline for vertical tilt
 void present();
 #define SCREEN_OFF_MS 30000UL
 
@@ -72,8 +75,6 @@ void present();
 #define ADDR_TOUCH 0x38
 uint8_t ADDR_IMU = 0x6B;
 
-#define GAZE_SIGN_X  (+1.0f)
-#define GAZE_SIGN_Y  (-1.0f)
 
 Arduino_DataBus *bus = nullptr;     // created in setup() once the board revision is known
 Arduino_CO5300 *panel = nullptr;
@@ -816,11 +817,18 @@ void behave(float dt) {
   gravX = approach(gravX, ax, 6, dt); gravY = approach(gravY, ay, 6, dt); gravZ = approach(gravZ, az, 6, dt);
   if (autoRotate) {                                        // 180 deg auto-rotate, 0.6 s hysteresis
     static uint32_t flipSince = 0;
-    float up = UPRIGHT_SIGN * gravY;
+    float up = -UPRIGHT_SIGN * gravX;                      // upright: ax ~ -1 g
     bool want = flipped ? !(up > 0.55f) : (up < -0.55f);
     if (want) { if (!flipSince) flipSince = now; if (now - flipSince > 600) { flipped = !flipped; flipSince = 0; lastInteract = now; } }
     else flipSince = 0;
   } else flipped = false;
+  {
+    const float rsg = flipped ? -1.0f : 1.0f;
+    float rRight = rsg * gravY, rDown = rsg * gravX;          // accel reading in screen axes
+    baseDown = approach(baseDown, rDown, 0.35f, dt);          // ~3 s: holding angle becomes neutral
+    tiltSX = -rRight;                                         // gravity side = where the eyes look
+    tiltSY = -(rDown - baseDown);
+  }
   float jerk = fabsf(amag - 1.0f) + (fabsf(gx) + fabsf(gy) + fabsf(gz)) / 900.0f;
   shakeEnergy = shakeEnergy * expf(-2.5f * dt) + jerk * dt * 8.0f;
   if (jerk > 0.08f) { if (asleep && jerk > 0.25f) wake(SURPRISED); lastMotion = now; }
@@ -830,7 +838,7 @@ void behave(float dt) {
   if (amag < 0.35f) { if (!freefallStart) freefallStart = now; } else freefallStart = 0;
   if (freefallStart && now - freefallStart > 60 && mood != PANIC) { setMood(PANIC, 900); wake(PANIC); if (talkative) say(EV_DROP); }
 
-  if (shakeEnergy > 3.2f && special != SP_DIZZY) {
+  if (shakeEnergy > 5.0f && special != SP_DIZZY) {
     setSpecial(SP_DIZZY, 2600); shakeEnergy = 0; wake(NEUTRAL); if (talkative) say(EV_SHAKE);
   } else if (amag > 2.3f && special == SP_NONE && mood != SURPRISED && mood != PANIC) {
     setMood(SURPRISED, 900); blinkT = -1; if (talkative) say(EV_BUMP);
@@ -973,7 +981,7 @@ void behave(float dt) {
   else converge = approach(converge, 0, 3, dt);
 
   const float rs = flipped ? -1.0f : 1.0f;                // gaze follows the rotated view
-  float tx = rs * GAZE_SIGN_X * gravX * 130 + glanceX, ty = rs * GAZE_SIGN_Y * gravY * 110 + glanceY;
+  float tx = tiltSX * 130 + glanceX, ty = tiltSY * 160 + glanceY;
   if (rollPhase >= 0) {
     rollPhase += dt; float a = rollPhase * 2 * PI / 1.1f - PI / 2;
     tx = cosf(a) * 70; ty = sinf(a) * 55 - 15; if (rollPhase > 1.1f) rollPhase = -1;
@@ -982,10 +990,11 @@ void behave(float dt) {
   {   // jelly inertia from linear acceleration (accel minus a slow gravity estimate)
     slowGX = approach(slowGX, ax, 2.5f, dt); slowGY = approach(slowGY, ay, 2.5f, dt);
     float lx2 = ax - slowGX, ly2 = ay - slowGY, mag = sqrtf(lx2 * lx2 + ly2 * ly2);
-    float k = clampf((mag - 0.15f) / 0.45f, 0, 1); k = k * k * (3 - 2 * k);   // only real wiggles count
+    float k = clampf((mag - 0.35f) / 0.75f, 0, 1); k = k * k * (3 - 2 * k);   // only hard wiggles count
     // same mapping as gaze: the eyes swing opposite to the device's acceleration
-    float tX = clampf(rs * GAZE_SIGN_X * lx2 * 230 * k, -170, 170);
-    float tY = clampf(rs * GAZE_SIGN_Y * ly2 * 230 * k, -220, 220);
+    // lx2/ly2 are device X (screen down) / Y (screen right); eyes lag opposite to the push
+    float tX = clampf(-rs * ly2 * 150 * k, -150, 150);
+    float tY = clampf(-rs * lx2 * 150 * k, -190, 190);
     svlX += ((tX - sloshX) * 260 - svlX * 9) * dt;     // bouncy spring back to centre
     svlY += ((tY - sloshY) * 260 - svlY * 9) * dt;
     sloshX += svlX * dt; sloshY += svlY * dt;
@@ -1130,7 +1139,7 @@ void obMode() {
   stepHeader("01", "CHOOSE MODE");
   // hover follows tilt (tilt the top/bottom towards you) or the finger
   if (touchDown) modeHover = touchY > H / 2 ? 1 : 0;
-  else if (fabsf(gravY) > 0.25f) modeHover = (GAZE_SIGN_Y * gravY > 0) ? 1 : 0;
+  else if (fabsf(tiltSY) > 0.25f) modeHover = tiltSY > 0 ? 1 : 0;
   drawTile(0, 0, modeHover == 0, t / 1000.0f);
   drawTile(1, 0, modeHover == 1, t / 1000.0f);
   label("TAP TO PICK", W / 2, H - 52, C_TEAL, 1);
@@ -1160,7 +1169,7 @@ int obChoose(int stepN, const char *title, const Choice *c, int n) {
   auto idxAt = [&](int y) { return constrain((y - top) / (th + gap), 0, n - 1); };
   if (choicePicked < 0) {
     if (touchDown) choiceHover = idxAt(touchY);
-    else if (fabsf(gravY) > 0.3f) choiceHover = GAZE_SIGN_Y * gravY > 0 ? n - 1 : 0;
+    else if (fabsf(tiltSY) > 0.3f) choiceHover = tiltSY > 0 ? n - 1 : 0;
     if (tapEvent && t > 400) { choicePicked = idxAt(touchY); choiceFlash = millis(); }
   }
   tapEvent = false;
@@ -1641,6 +1650,7 @@ void setup() {
   randomSeed(esp_random());
   lastMotion = millis();
 
+  Serial.printf("Reset reason: %d (1=power-on 3=sw 4=panic 5=int-wdt 6=task-wdt 9=brownout)\n", (int)esp_reset_reason());
   Serial.printf("MEM internal free %u KB (largest %u KB), PSRAM free %u / %u KB\n",
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024,
                 ESP.getFreePsram() / 1024, ESP.getPsramSize() / 1024);
@@ -1706,6 +1716,13 @@ void wakeScreen() {
 }
 void screenOffLoop(uint32_t now) {
   static bool was = false; static uint32_t downAt = 0, lastTap = 0, nextBat = 0;
+  static uint32_t shakeHits[3] = {0, 0, 0};
+  imuRead();                                        // shake to wake: 3 firm jolts within 1.2 s
+  float am = sqrtf(ax * ax + ay * ay + az * az);
+  if (fabsf(am - 1.0f) > 0.6f && now - shakeHits[2] > 90) {
+    shakeHits[0] = shakeHits[1]; shakeHits[1] = shakeHits[2]; shakeHits[2] = now;
+    if (shakeHits[0] && now - shakeHits[0] < 1200) { shakeHits[0] = shakeHits[1] = shakeHits[2] = 0; wakeScreen(); return; }
+  }
   touchRead();
   if (touchDown && !was) downAt = now;
   if (!touchDown && was && now - downAt < 350) {    // a tap
