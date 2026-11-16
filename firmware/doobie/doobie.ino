@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.2
+//  DOOBIE COMPANION, firmware 1.3
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -15,7 +15,9 @@
 //  Optional mic: Adafruit PDM MEMS mic (#3492) on GPIO5 = CLK, GPIO6 = DAT,
 //  auto-detected at boot. Without it the noise reactions are simply off.
 //    4 taps in 1 s : settings (focus timer, clock, mode, vibe, profile, power)
-//    BOOT short press : toggle light / dark (wakes it when off)
+//    Screen sleeps after 30 s without touch / real movement; DOUBLE-TAP wakes it.
+//    Settings > AOD keeps the screen on (dozes dim instead).
+//    BOOT short press : toggle light / dark (or wake the screen)
 //    BOOT hold 2 s    : power off (deep sleep); press BOOT or RST to turn on
 // ============================================================================
 #include <Arduino_GFX_Library.h>
@@ -33,10 +35,15 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.2"
+#define FW_VERSION "1.3"
 
 void powerOff(const char *msg);
+void wakeScreen();
 extern OnbStep ob;
+bool screenOff = false;           // screen-sleep (not deep sleep): panel off, touch polled
+uint32_t lastInteract = 0;        // last touch / real movement
+bool aodOn = false;               // always-on display
+#define SCREEN_OFF_MS 30000UL
 
 // ---------- pins (Waveshare 1.64; V1.1 moved LCD CS to GPIO46, see detectBoard) ----------
 #define PIN_LCD_RST   21
@@ -759,6 +766,7 @@ void behave(float dt) {
   float jerk = fabsf(amag - 1.0f) + (fabsf(gx) + fabsf(gy) + fabsf(gz)) / 900.0f;
   shakeEnergy = shakeEnergy * expf(-2.5f * dt) + jerk * dt * 8.0f;
   if (jerk > 0.08f) { if (asleep && jerk > 0.25f) wake(SURPRISED); lastMotion = now; }
+  if (jerk > 0.25f || touchDown) lastInteract = now;
 
   if (amag < 0.35f) { if (!freefallStart) freefallStart = now; } else freefallStart = 0;
   if (freefallStart && now - freefallStart > 60 && mood != PANIC) { setMood(PANIC, 900); wake(PANIC); if (talkative) say(EV_DROP); }
@@ -1202,6 +1210,7 @@ void obSettings() {
   } else {
     snprintf(brightTxt, sizeof(brightTxt), "BRIGHT %d", (brightIdx + 1) * 25);   // <=10 chars: one line
     items[n] = { brightTxt, "TAP: 25 / 50 / 75 / 100" }; ids[n++] = 14;
+    items[n] = { aodOn ? "AOD: ON" : "AOD: OFF", "ALWAYS-ON DISPLAY" }; ids[n++] = 24;
     items[n] = { "PROFILE", "REDO ONBOARDING" }; ids[n++] = 2;
     items[n] = { "POWER OFF", "BOOT WAKES IT" }; ids[n++] = 4;
     items[n] = { "BACK", nullptr }; ids[n++] = 13;
@@ -1248,6 +1257,7 @@ void obSettings() {
       case 21: breakIdx = (breakIdx + 1) % sizeof(BREAK_OPTS); prefs.putUChar("bmin", breakIdx); break;
       case 22: longIdx = (longIdx + 1) % sizeof(LONG_OPTS); prefs.putUChar("lmin", longIdx); break;
       case 23: pomoAuto = !pomoAuto; prefs.putBool("pauto", pomoAuto); break;
+      case 24: aodOn = !aodOn; prefs.putBool("aod", aodOn); break;
       case 14: brightIdx = (brightIdx + 1) % 4; prefs.putUChar("bright", brightIdx);
                brightness = brightTarget = userBright(); panel->setBrightness(brightness); break;
     }
@@ -1441,7 +1451,9 @@ void pollButton() {
   if (down && !downAt) { downAt = millis(); longFired = false; }
   if (down && downAt && !longFired && millis() - downAt > 2000) { longFired = true; powerOff("GOODNIGHT."); }
   if (!down && downAt) {
-    if (!longFired && millis() - downAt > 30 && ob == OB_FINISHED) {
+    if (!longFired && millis() - downAt > 30 && screenOff) wakeScreen();
+    else if (!longFired && millis() - downAt > 30 && ob == OB_FINISHED) {
+      lastInteract = millis();
       applyTheme(!darkMode); saveTheme();
       sayText(darkMode ? "LIGHTS OFF." : "LIGHTS ON.");
       wake(NEUTRAL);
@@ -1536,6 +1548,7 @@ void setup() {
   breakIdx = min((int)prefs.getUChar("bmin", 1), (int)sizeof(BREAK_OPTS) - 1);
   longIdx  = min((int)prefs.getUChar("lmin", 1), (int)sizeof(LONG_OPTS) - 1);
   pomoAuto = prefs.getBool("pauto", true);
+  aodOn = prefs.getBool("aod", false);
   brightness = brightTarget = userBright(); panel->setBrightness(brightness);
   profSex = prefs.getUChar("sex", 2); profAdult = prefs.getBool("adult", false);
   // 0.3 stored a "spicy" bool; map it: spicy -> 2, otherwise flirty (what 0.3 adults got)
@@ -1555,6 +1568,54 @@ void setup() {
   else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) { rtc_gpio_deinit(GPIO_NUM_0); pinMode(PIN_BOOT, INPUT_PULLUP); sayText("I'M BACK!"); }
   else { say(EV_GREET); }
   if (profTone == 3 || profTone == 4) nextIdleTalk = millis() + 15000;
+  lastInteract = millis();
+}
+
+// ============================================================================
+//  Screen sleep (light): panel off, CPU at 80 MHz, touch polled ~25x/s for a
+//  double-tap. Not deep sleep: the clock, focus timer and NVS state keep going.
+// ============================================================================
+void screenSleep() {
+  if (screenOff) return;
+  for (int b = brightness; b > 0; b -= 24) { panel->setBrightness(b); delay(8); }
+  panel->setBrightness(0);
+  panel->displayOff();
+  screenOff = true; speechText = nullptr;
+  setCpuFrequencyMhz(80);
+  Serial.println("screen off");
+}
+void wakeScreen() {
+  if (!screenOff) return;
+  setCpuFrequencyMhz(240);
+  screenOff = false;
+  asleep = false; special = SP_NONE; baseMood = NEUTRAL; mood = NEUTRAL;
+  eyeOpen = 0;                                      // eyes open up on wake
+  blinkT = -1;
+  uint32_t now = millis();
+  lastInteract = lastMotion = now;
+  wasTouch = touchDown;                             // the wake taps aren't a "tap" reaction
+  drawBackground(); g->flush();
+  panel->displayOn();
+  brightness = brightTarget = userBright(); panel->setBrightness(brightness);
+  if (random(100) < 45) say(EV_WAKE);
+  Serial.println("screen on");
+}
+void screenOffLoop(uint32_t now) {
+  static bool was = false; static uint32_t downAt = 0, lastTap = 0, nextBat = 0;
+  touchRead();
+  if (touchDown && !was) downAt = now;
+  if (!touchDown && was && now - downAt < 350) {    // a tap
+    if (lastTap && now - lastTap < 500) { lastTap = 0; was = touchDown; wakeScreen(); return; }
+    lastTap = now;
+  }
+  was = touchDown;
+  if (pomo && (int32_t)(now - pomoEnd) >= 0) { wakeScreen(); return; }   // focus/break change: show it
+  if (now > nextBat) {                              // protect the cell while dark
+    nextBat = now + 10000;
+    float v = batteryV();
+    if (v > 2.5f && v < 3.30f) { wakeScreen(); powerOff("TOO TIRED. BYE..."); }
+  }
+  delay(35);
 }
 
 void loop() {
@@ -1565,18 +1626,13 @@ void loop() {
 
   pollButton();
   pollSerial();
+  if (screenOff) { screenOffLoop(now); return; }
   talkative = (ob == OB_FINISHED);
   behave(dt);
 
-  // Power saving for the 150 mAh cell: ~12 fps while asleep, panel fully off
-  // after 5 min asleep (IMU still polled, so any motion wakes it).
-  static bool panelOff = false;
-  if (asleep && ob == OB_FINISHED && now - asleepSince > 300000) {
-    if (!panelOff) { panel->displayOff(); panelOff = true; Serial.println("panel off"); }
-    delay(150);
-    return;
-  }
-  if (panelOff) { panel->displayOn(); panelOff = false; panel->setBrightness(brightness); }
+  // Screen sleep: with AOD off, 30 s without touch or real movement turns the
+  // panel off. Double-tap or BOOT wakes it. With AOD on, Doobie just dozes dim.
+  if (!aodOn && ob == OB_FINISHED && now - lastInteract > SCREEN_OFF_MS) { screenSleep(); return; }
 
   switch (ob) {
     case OB_BOOT:      obBoot(); break;
@@ -1594,6 +1650,7 @@ void loop() {
     case OB_COLOR:     obColor(); break;
     default:
       if (tripleTap) { tripleTap = false; openSettings(); break; }
+      eyeOpen = approach(eyeOpen, 1.0f, 7, dt);           // opens after a screen wake
       tapEvent = false;
       drawBackground();
       drawFace(now / 1000.0f);
