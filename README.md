@@ -63,6 +63,10 @@ The 18+ confirmation is self-declared. Flirty lines are only drawn when it has b
 
 **Pacing:** idle remarks come every 28-69 s. Taps get a spoken reply about two times in three. Low-stakes reactions wait 2.5 s after the previous message, and the eyes stay below the text while Doobie is talking.
 
+### Auto-rotate
+
+The QMI8658 tracks which way is up. Hold Doobie upside down for about 0.6 s and the whole view flips 180°: drawing, touch coordinates and eye gaze all follow. It's on by default; toggle it in *Settings → page 2 → ROTATE*. If it flips the wrong way, change `UPRIGHT_SIGN` to `-1.0f`. Landscape isn't supported because every screen is laid out for portrait.
+
 ### Charge LEDs
 
 The board shows charge state in hardware, and the lights glow through a translucent case:
@@ -78,6 +82,13 @@ The red LED runs from USB 5 V. The green LED is driven by the ETA6098's STAT pin
 - STAT (the CHG LED cathode) to a 100 kΩ resistor to GPIO7
 - GPIO7 to a 100 kΩ resistor to GND
 
+**Custom LED behaviour (mod).** The stock LEDs can't be controlled from firmware. Add your own on spare GPIOs, wired GPIO → 1 kΩ → LED → GND, and set `LED_RED_PIN` / `LED_GREEN_PIN` (for example 16 and 17). The firmware then drives them like this:
+- **Red:** on when USB is plugged in or the battery is below 10 %.
+- **Green:** on only when the battery is full (needs the `CHG_SENSE_PIN` mod above).
+- **Both:** a quick alternating dance when Doobie is super happy (held/petted, a focus round finished, or fully charged).
+
+You can cover or desolder the stock LEDs if their light is distracting.
+
 **Charge current warning (V1 boards):** R11 = 82 kΩ sets the charger to 2 A, far too much for a 150 mAh cell. Replace it with about 1.2 MΩ (~0.14 A). V1.1 boards ship with 360 kΩ (0.5 A).
 
 ### Optional microphone
@@ -92,7 +103,7 @@ The board has no mic. Wire an Adafruit PDM MEMS mic breakout (#3492, MP34DT01-M)
 | DAT | GPIO6 |
 
 The firmware detects it at boot; the serial log shows `Mic: detected`. The level thresholds (`MIC_*_DB`) are first guesses based on the mic's datasheet sensitivity, so tune them against the `mic=…dB` value in the serial log.
-- **Settings:** tap the screen **4 times within 1 second**. Page 1 has Focus, Time, Theme and Attitude, each opening its own submenu. Page 2 has Brightness (25 / 50 / 75 / 100 %, saved), AOD (always-on display), Profile (redo onboarding), Power off, Back and Exit. The menu closes on its own after 10 s idle.
+- **Settings:** tap the screen **4 times within 1 second**. Page 1 has Focus, Time, Theme and Attitude, each opening its own submenu. Page 2 has Brightness (25 / 50 / 75 / 100 %, saved), AOD (always-on display), Rotate, Profile (redo onboarding), Power off and Back. Exit is on page 1. The menu closes on its own after 10 s idle.
 - **Attitude:** *Settings → Attitude…* picks how Doobie talks:
   - **Pet:** cat/dog attitude, no flirting.
   - **Cute:** charming, never rude (18+).

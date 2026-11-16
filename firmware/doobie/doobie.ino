@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.3
+//  DOOBIE COMPANION, firmware 1.4
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -35,7 +35,7 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.3"
+#define FW_VERSION "1.4"
 
 void powerOff(const char *msg);
 void wakeScreen();
@@ -43,6 +43,10 @@ extern OnbStep ob;
 bool screenOff = false;           // screen-sleep (not deep sleep): panel off, touch polled
 uint32_t lastInteract = 0;        // last touch / real movement
 bool aodOn = false;               // always-on display
+bool autoRotate = true;           // flip the view 180 deg when held upside down
+bool flipped = false;
+#define UPRIGHT_SIGN (+1.0f)      // gravity on +Y when held upright; flip to -1 if rotation is backwards
+void present();
 #define SCREEN_OFF_MS 30000UL
 
 // ---------- pins (Waveshare 1.64; V1.1 moved LCD CS to GPIO46, see detectBoard) ----------
@@ -236,7 +240,10 @@ void touchRead() {
   uint8_t b[5];
   if (!i2cRead(ADDR_TOUCH, 0x02, b, 5)) { touchDown = false; return; }
   touchDown = (b[0] & 0x0F) > 0;
-  if (touchDown) { touchX = ((b[1] & 0x0F) << 8) | b[2]; touchY = ((b[3] & 0x0F) << 8) | b[4]; }
+  if (touchDown) {
+    touchX = ((b[1] & 0x0F) << 8) | b[2]; touchY = ((b[3] & 0x0F) << 8) | b[4];
+    if (flipped) { touchX = W - 1 - touchX; touchY = H - 1 - touchY; }   // match the rotated view
+  }
 }
 // V1 board: the divider sits on the system rail (VCC), not VBAT. On USB it reads
 // ~4.7 V; on battery VCC = VBAT through the AO3401 power-path FET, so it reads
@@ -251,6 +258,17 @@ float batV = 4.0f; bool onUsb = false;
 // floats up to VBAT through the LED when done, so the divider reads ~1.5-2.1 V.
 #define CHG_SENSE_PIN  -1          // -1 = mod not fitted
 bool chargeFull = false;
+
+// Optional LED mod. The stock LEDs are hard-wired (red = USB 5 V, green = charger
+// STAT, ON while charging), so firmware can't steer them. Fit your own LEDs
+// (anode -> GPIO via 1k, cathode -> GND) and set the pins:
+//   red   : on when USB is plugged in or the battery is below 10 %
+//   green : on only when the battery is full (needs the CHG_SENSE_PIN mod)
+//   both  : a quick alternating dance when Doobie is super happy
+#define LED_RED_PIN    -1          // e.g. 16
+#define LED_GREEN_PIN  -1          // e.g. 17
+uint32_t ledDanceUntil = 0;
+void ledDance(uint32_t ms) { ledDanceUntil = millis() + ms; }
 bool readChargeFull() {
 #if CHG_SENSE_PIN >= 0
   return analogReadMilliVolts(CHG_SENSE_PIN) > 900;
@@ -763,6 +781,13 @@ void behave(float dt) {
 
   float amag = sqrtf(ax * ax + ay * ay + az * az);
   gravX = approach(gravX, ax, 6, dt); gravY = approach(gravY, ay, 6, dt); gravZ = approach(gravZ, az, 6, dt);
+  if (autoRotate) {                                        // 180 deg auto-rotate, 0.6 s hysteresis
+    static uint32_t flipSince = 0;
+    float up = UPRIGHT_SIGN * gravY;
+    bool want = flipped ? !(up > 0.55f) : (up < -0.55f);
+    if (want) { if (!flipSince) flipSince = now; if (now - flipSince > 600) { flipped = !flipped; flipSince = 0; lastInteract = now; } }
+    else flipSince = 0;
+  } else flipped = false;
   float jerk = fabsf(amag - 1.0f) + (fabsf(gx) + fabsf(gy) + fabsf(gz)) / 900.0f;
   shakeEnergy = shakeEnergy * expf(-2.5f * dt) + jerk * dt * 8.0f;
   if (jerk > 0.08f) { if (asleep && jerk > 0.25f) wake(SURPRISED); lastMotion = now; }
@@ -780,7 +805,7 @@ void behave(float dt) {
   // touch
   if (touchDown && !wasTouch) touchStart = now;
   if (touchDown && now - touchStart > 700 && special != SP_LOVE) {
-    if (asleep) wake(ANGRY); else { setSpecial(SP_LOVE, 2500); blushT = 1; if (talkative) say(EV_LOVE); }
+    if (asleep) wake(ANGRY); else { setSpecial(SP_LOVE, 2500); blushT = 1; ledDance(1500); if (talkative) say(EV_LOVE); }
   }
   if (!touchDown && wasTouch && now - touchStart < 700) {
     tapEvent = true;
@@ -822,7 +847,7 @@ void behave(float dt) {
       if (usb && baseMood == SAD) baseMood = NEUTRAL;
     }
     bool full = usb && readChargeFull();
-    if (!firstBat && full && !chargeFull && talkative) { setMood(HAPPY, 1500); sayText("ALL CHARGED UP!"); }
+    if (!firstBat && full && !chargeFull && talkative) { setMood(HAPPY, 1500); sayText("ALL CHARGED UP!"); ledDance(1500); }
     chargeFull = full;
     onUsb = usb; firstBat = false;
     if (!usb && batV > 2.5f && batV < 3.30f && ob == OB_FINISHED) powerOff("TOO TIRED. BYE...");   // protect the cell
@@ -837,7 +862,7 @@ void behave(float dt) {
     if (pomo == POMO_FOCUS) {
       pomoCount++;
       pomo = POMO_BREAK; pomoLen = (pomoCount % 4 == 0) ? LBREAK_MS : BREAK_MS;
-      setMood(HAPPY, 2500); blushT = 1; say(EV_BREAK);
+      setMood(HAPPY, 2500); blushT = 1; ledDance(1200); say(EV_BREAK);
     } else if (pomoAuto) {
       pomo = POMO_FOCUS; pomoLen = FOCUS_MS; say(EV_FOCUS);
     } else {
@@ -913,7 +938,8 @@ void behave(float dt) {
   if (convergeT > 0) { converge = approach(converge, convergeT, 6, dt); if (converge > convergeT - 1) convergeT = -1; }
   else converge = approach(converge, 0, 3, dt);
 
-  float tx = GAZE_SIGN_X * gravX * 130 + glanceX, ty = GAZE_SIGN_Y * gravY * 110 + glanceY;
+  const float rs = flipped ? -1.0f : 1.0f;                // gaze follows the rotated view
+  float tx = rs * GAZE_SIGN_X * gravX * 130 + glanceX, ty = rs * GAZE_SIGN_Y * gravY * 110 + glanceY;
   if (rollPhase >= 0) {
     rollPhase += dt; float a = rollPhase * 2 * PI / 1.1f - PI / 2;
     tx = cosf(a) * 70; ty = sinf(a) * 55 - 15; if (rollPhase > 1.1f) rollPhase = -1;
@@ -1173,6 +1199,7 @@ void obSettings() {
     snprintf(toneTxt, sizeof(toneTxt), "%s", "ATTITUDE...");
     items[n] = { toneTxt, "PET, CUTE, SPICY, QUOTES, EVENTS" }; ids[n++] = 17;
     items[n] = { "MORE...", nullptr }; ids[n++] = 12;
+    items[n] = { "EXIT", nullptr }; ids[n++] = 3;
   } else if (settingsPage == 6) {                   // 18+ confirm for Cute / Spicy
     items[n] = { "I'M 18+", "UNLOCKS CUTE (FLIRTY)" }; ids[n++] = 50;
     items[n] = { "CANCEL", nullptr }; ids[n++] = 51;
@@ -1211,10 +1238,10 @@ void obSettings() {
     snprintf(brightTxt, sizeof(brightTxt), "BRIGHT %d", (brightIdx + 1) * 25);   // <=10 chars: one line
     items[n] = { brightTxt, "TAP: 25 / 50 / 75 / 100" }; ids[n++] = 14;
     items[n] = { aodOn ? "AOD: ON" : "AOD: OFF", "ALWAYS-ON DISPLAY" }; ids[n++] = 24;
+    items[n] = { autoRotate ? "ROTATE: ON" : "ROTATE OFF", "FLIP WHEN UPSIDE DOWN" }; ids[n++] = 25;
     items[n] = { "PROFILE", "REDO ONBOARDING" }; ids[n++] = 2;
     items[n] = { "POWER OFF", "BOOT WAKES IT" }; ids[n++] = 4;
     items[n] = { "BACK", nullptr }; ids[n++] = 13;
-    items[n] = { "EXIT", nullptr }; ids[n++] = 3;
   }
   if (touchDown) settingsTouched = millis();
   int r = obChoose(0, settingsPage == 0 ? "SETTINGS 1/2" : settingsPage == 1 ? "SETTINGS 2/2" : settingsPage == 2 ? "FOCUS" : settingsPage == 3 ? "THEME" : settingsPage == 4 ? "ATTITUDE 1/2" : settingsPage == 5 ? "ATTITUDE 2/2" : "18+ ONLY", items, n);
@@ -1258,6 +1285,7 @@ void obSettings() {
       case 22: longIdx = (longIdx + 1) % sizeof(LONG_OPTS); prefs.putUChar("lmin", longIdx); break;
       case 23: pomoAuto = !pomoAuto; prefs.putBool("pauto", pomoAuto); break;
       case 24: aodOn = !aodOn; prefs.putBool("aod", aodOn); break;
+      case 25: autoRotate = !autoRotate; prefs.putBool("rot", autoRotate); break;
       case 14: brightIdx = (brightIdx + 1) % 4; prefs.putUChar("bright", brightIdx);
                brightness = brightTarget = userBright(); panel->setBrightness(brightness); break;
     }
@@ -1477,14 +1505,14 @@ void powerOff(const char *msg) {
     uint32_t now = millis(); float dt = (now - last) / 1000.0f; last = now;
     eyeOpen = 1.0f - clampf((now - t0 - 700) / 900.0f, 0, 1);
     tweenShape(curL, moodShape(SLEEPY, true), dt, 6); tweenShape(curR, moodShape(SLEEPY, false), dt, 6);
-    drawBackground(); drawFace(now / 1000.0f); drawSpeech(); g->flush();
+    drawBackground(); drawFace(now / 1000.0f); drawSpeech(); present();
   }
   for (int i = 0; i <= 14; i++) {              // old-TV collapse to a dot
     drawBackground();
     float k = i / 14.0f;
     int w = (int)(W * 0.7f * (1 - k)) + 6, h = (int)(10 * (1 - k)) + 4;
     g->fillRoundRect(W / 2 - w / 2, H / 2 - h / 2, w, h, h / 2, C_INK);
-    g->flush(); delay(16);
+    present(); delay(16);
   }
   for (int b = userBright(); b > 0; b -= 32) { panel->setBrightness(b); delay(12); }
   panel->setBrightness(0);
@@ -1506,6 +1534,12 @@ void powerOff(const char *msg) {
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_BOOT, INPUT_PULLUP);
+#if LED_RED_PIN >= 0
+  pinMode(LED_RED_PIN, OUTPUT);
+#endif
+#if LED_GREEN_PIN >= 0
+  pinMode(LED_GREEN_PIN, OUTPUT);
+#endif
   Wire.begin(PIN_SDA, PIN_SCL, 400000);
   imuInit();
   analogReadResolution(12);
@@ -1549,6 +1583,7 @@ void setup() {
   longIdx  = min((int)prefs.getUChar("lmin", 1), (int)sizeof(LONG_OPTS) - 1);
   pomoAuto = prefs.getBool("pauto", true);
   aodOn = prefs.getBool("aod", false);
+  autoRotate = prefs.getBool("rot", true);
   brightness = brightTarget = userBright(); panel->setBrightness(brightness);
   profSex = prefs.getUChar("sex", 2); profAdult = prefs.getBool("adult", false);
   // 0.3 stored a "spicy" bool; map it: spicy -> 2, otherwise flirty (what 0.3 adults got)
@@ -1571,6 +1606,15 @@ void setup() {
   lastInteract = millis();
 }
 
+// Push the frame; when flipped, rotate it 180 degrees in place (a reverse).
+void present() {
+  if (flipped) {
+    uint16_t *fb = g->getFramebuffer();
+    for (int i = 0, j = W * H - 1; i < j; i++, j--) { uint16_t t = fb[i]; fb[i] = fb[j]; fb[j] = t; }
+  }
+  g->flush();
+}
+
 // ============================================================================
 //  Screen sleep (light): panel off, CPU at 80 MHz, touch polled ~25x/s for a
 //  double-tap. Not deep sleep: the clock, focus timer and NVS state keep going.
@@ -1584,6 +1628,21 @@ void screenSleep() {
   setCpuFrequencyMhz(80);
   Serial.println("screen off");
 }
+int batteryPct();
+void ledsUpdate(uint32_t now) {
+#if LED_RED_PIN >= 0 || LED_GREEN_PIN >= 0
+  bool red = onUsb || batteryPct() < 10;
+  bool green = onUsb && chargeFull;
+  if (now < ledDanceUntil) { bool ph = (now / 110) % 2; red = ph; green = !ph; }
+#if LED_RED_PIN >= 0
+  digitalWrite(LED_RED_PIN, red);
+#endif
+#if LED_GREEN_PIN >= 0
+  digitalWrite(LED_GREEN_PIN, green);
+#endif
+#endif
+}
+
 void wakeScreen() {
   if (!screenOff) return;
   setCpuFrequencyMhz(240);
@@ -1594,7 +1653,7 @@ void wakeScreen() {
   uint32_t now = millis();
   lastInteract = lastMotion = now;
   wasTouch = touchDown;                             // the wake taps aren't a "tap" reaction
-  drawBackground(); g->flush();
+  drawBackground(); present();
   panel->displayOn();
   brightness = brightTarget = userBright(); panel->setBrightness(brightness);
   if (random(100) < 45) say(EV_WAKE);
@@ -1626,6 +1685,7 @@ void loop() {
 
   pollButton();
   pollSerial();
+  ledsUpdate(now);
   if (screenOff) { screenOffLoop(now); return; }
   talkative = (ob == OB_FINISHED);
   behave(dt);
@@ -1672,13 +1732,13 @@ void loop() {
         }
       }
   }
-  g->flush();
+  present();
   if (asleep) delay(60);
 
   if (now - lastLog > 500) {
     lastLog = now;
-    Serial.printf("t=%ld pomo=%d usb=%d batV=%.2f mic=%s%.0fdB ob=%d dark=%d a=%.2f,%.2f,%.2f touch=%d(%d,%d) bat=%.2fV mood=%d sp=%d say=\"%s\" fps=%.0f\n",
-                  clockValid() ? (long)(time(nullptr) % 86400) : -1L, pomo, onUsb, batV, micOk ? "" : "off/", (float)micDb, ob, darkMode, ax, ay, az, touchDown, touchX, touchY, batteryV(), mood, special,
+    Serial.printf("rot=%d t=%ld pomo=%d usb=%d batV=%.2f mic=%s%.0fdB ob=%d dark=%d a=%.2f,%.2f,%.2f touch=%d(%d,%d) bat=%.2fV mood=%d sp=%d say=\"%s\" fps=%.0f\n",
+                  flipped, clockValid() ? (long)(time(nullptr) % 86400) : -1L, pomo, onUsb, batV, micOk ? "" : "off/", (float)micDb, ob, darkMode, ax, ay, az, touchDown, touchX, touchY, batteryV(), mood, special,
                   speaking() ? speechText : "", 1.0f / dt);
   }
 }
