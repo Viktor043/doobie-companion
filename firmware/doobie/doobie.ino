@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.4
+//  DOOBIE COMPANION, firmware 1.5
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -35,13 +35,14 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.4"
+#define FW_VERSION "1.5"
 
 void powerOff(const char *msg);
 void wakeScreen();
 extern OnbStep ob;
 bool screenOff = false;           // screen-sleep (not deep sleep): panel off, touch polled
 uint32_t lastInteract = 0;        // last touch / real movement
+uint32_t lastMove = 0;            // last movement of any size (sensor only)
 bool aodOn = false;               // always-on display
 bool autoRotate = true;           // flip the view 180 deg when held upside down
 bool flipped = false;
@@ -792,6 +793,7 @@ void behave(float dt) {
   shakeEnergy = shakeEnergy * expf(-2.5f * dt) + jerk * dt * 8.0f;
   if (jerk > 0.08f) { if (asleep && jerk > 0.25f) wake(SURPRISED); lastMotion = now; }
   if (jerk > 0.25f || touchDown) lastInteract = now;
+  if (jerk > 0.08f) lastMove = now;                      // any movement keeps the screen on
 
   if (amag < 0.35f) { if (!freefallStart) freefallStart = now; } else freefallStart = 0;
   if (freefallStart && now - freefallStart > 60 && mood != PANIC) { setMood(PANIC, 900); wake(PANIC); if (talkative) say(EV_DROP); }
@@ -1603,7 +1605,7 @@ void setup() {
   else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) { rtc_gpio_deinit(GPIO_NUM_0); pinMode(PIN_BOOT, INPUT_PULLUP); sayText("I'M BACK!"); }
   else { say(EV_GREET); }
   if (profTone == 3 || profTone == 4) nextIdleTalk = millis() + 15000;
-  lastInteract = millis();
+  lastInteract = lastMove = millis();
 }
 
 // Push the frame; when flipped, rotate it 180 degrees in place (a reverse).
@@ -1651,7 +1653,7 @@ void wakeScreen() {
   eyeOpen = 0;                                      // eyes open up on wake
   blinkT = -1;
   uint32_t now = millis();
-  lastInteract = lastMotion = now;
+  lastInteract = lastMotion = lastMove = now;
   wasTouch = touchDown;                             // the wake taps aren't a "tap" reaction
   drawBackground(); present();
   panel->displayOn();
@@ -1692,7 +1694,15 @@ void loop() {
 
   // Screen sleep: with AOD off, 30 s without touch or real movement turns the
   // panel off. Double-tap or BOOT wakes it. With AOD on, Doobie just dozes dim.
-  if (!aodOn && ob == OB_FINISHED && now - lastInteract > SCREEN_OFF_MS) { screenSleep(); return; }
+  {
+    // Wrap-safe: timestamps set later in this loop (touch / motion) must not
+    // look like "idle for ages" (that was the 1.3/1.4 instant-off bug).
+    const uint32_t m = millis();
+    auto idleFor = [&](uint32_t t) { return (int32_t)(m - t) < 0 ? 0 : (int32_t)(m - t); };
+    int32_t idle = min(idleFor(lastInteract), idleFor(lastMove));
+    bool talking = speechText != nullptr || idleFor(speechEndsAt) < 3000;   // never mid-sentence
+    if (!aodOn && ob == OB_FINISHED && !talking && idle > (int32_t)SCREEN_OFF_MS) { screenSleep(); return; }
+  }
 
   switch (ob) {
     case OB_BOOT:      obBoot(); break;
