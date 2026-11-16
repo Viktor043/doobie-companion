@@ -1,5 +1,5 @@
 // ============================================================================
-//  DOOBIE COMPANION, firmware 1.5
+//  DOOBIE COMPANION, firmware 1.6
 //  Board : Waveshare ESP32-S3-Touch-AMOLED-1.64, V1 or V1.1 (auto-detected), 280x456 AMOLED
 //  MCU   : ESP32-S3R8, 16MB flash, 8MB OPI PSRAM
 //  Sense : QMI8658 6-axis IMU (0x6B), FT3168 touch (0x38), battery ADC GPIO4,
@@ -35,7 +35,7 @@
 #include "quotes.h"
 #include "chars.h"
 
-#define FW_VERSION "1.5"
+#define FW_VERSION "1.6"
 
 void powerOff(const char *msg);
 void wakeScreen();
@@ -642,6 +642,8 @@ float blinkT = -1; int blinkWhich = 0;
 uint32_t nextBlink = 2000, nextGlance = 1500, nextTrick = 12000;
 float eyeOpen = 1.0f;     // 0 = closed line (used by onboarding to open the eyes)
 float audioPulse = 0;     // 0..1 loudness above ambient, makes the eyes bounce
+// Jelly inertia: eyes lag behind sharp movement and squash against the edges.
+float sloshX = 0, sloshY = 0, svlX = 0, svlY = 0, slowGX = 0, slowGY = 0;
 
 static void tweenShape(EyeShape &c, const EyeShape &t, float dt, float rate) {
   c.w = approach(c.w, t.w, rate, dt); c.h = approach(c.h, t.h, rate, dt); c.r = approach(c.r, t.r, rate, dt);
@@ -709,6 +711,32 @@ void drawFace(float t) {
   float gy = gazeY * GAZE_KY * gk;
   if (speechText && !card) gy = fmaxf(gy, -24.0f);   // breathing room under normal speech
   float ly = cy + gy + bob, ry = ly;
+  // jelly: slide with the slosh, squash against the walls (and each other)
+  const float jk = 1 - k;                                      // calmer while a card is up
+  lx += sloshX * jk; rx += sloshX * jk; ly += sloshY * jk; ry = ly;
+  float kxL = 1, kxR = 1, kyE = 1;
+  if (special == SP_NONE) {
+    const float M = 8, GAP = 6, MINK = 0.3f;
+    float hwL = curL.w * sc * 0.5f, hwR = curR.w * sc * 0.5f, hh = fmaxf(curL.h, curR.h) * sc * 0.5f;
+    float over = (rx + hwR) - (W - M);                         // right wall
+    if (over > 0) {
+      float nw = fmaxf(hwR * 2 - over, hwR * 2 * MINK); kxR = nw / (hwR * 2); hwR = nw / 2; rx = W - M - hwR;
+      float o2 = (lx + hwL) - (rx - hwR - GAP);                // left eye piles into the right one
+      if (o2 > 0) { float nl = fmaxf(hwL * 2 - o2, hwL * 2 * MINK); kxL = nl / (hwL * 2); hwL = nl / 2; lx = rx - hwR - GAP - hwL; }
+    }
+    over = M - (lx - hwL);                                     // left wall
+    if (over > 0) {
+      float nl = fmaxf(hwL * 2 - over, hwL * 2 * MINK); kxL *= nl / (hwL * 2); hwL = nl / 2; lx = M + hwL;
+      float o2 = (lx + hwL + GAP) - (rx - hwR);
+      if (o2 > 0) { float nw = fmaxf(hwR * 2 - o2, hwR * 2 * MINK); kxR *= nw / (hwR * 2); hwR = nw / 2; rx = lx + hwL + GAP + hwR; }
+    }
+    const float top = 18, bot = H - 40;                        // floor / ceiling
+    over = top - (ly - hh);
+    if (over > 0) { float nh = fmaxf(hh * 2 - over, hh * 2 * MINK); kyE = nh / (hh * 2); ly = top + nh / 2; }
+    over = (ly + hh) - bot;
+    if (over > 0) { float nh = fmaxf(hh * 2 - over, hh * 2 * MINK); kyE = nh / (hh * 2); ly = bot - nh / 2; }
+    ry = ly;
+  }
   float sqL = 1 - eyeOpen, sqR = 1 - eyeOpen;
   if (blinkT >= 0) {
     float p = blinkT / 0.16f, s = p < 1 ? sinf(p * PI) : 0;
@@ -728,8 +756,12 @@ void drawFace(float t) {
       if (zt < 0.85f) drawZ(rx + 20 + zt * 30, ry - 40 - zt * 90, 2 + (int)(zt * 4));
     }
   } else {
-    drawEye(lx, ly, curL, sqL, true, sc);
-    drawEye(rx, ry, curR, sqR, false, sc);
+    // squashed one way, bulge the other way (keeps the "volume")
+    EyeShape eL = curL, eR = curR;
+    eL.w *= kxL * (1 + 0.45f * (1 - kyE)); eL.h *= kyE * (1 + 0.45f * (1 - kxL));
+    eR.w *= kxR * (1 + 0.45f * (1 - kyE)); eR.h *= kyE * (1 + 0.45f * (1 - kxR));
+    drawEye(lx, ly, eL, sqL, true, sc);
+    drawEye(rx, ry, eR, sqR, false, sc);
   }
   if (blush > 0.05f) {
     float ry2 = 12 * blush * fs, rx2 = 30 * blush * fs;
@@ -947,6 +979,17 @@ void behave(float dt) {
     tx = cosf(a) * 70; ty = sinf(a) * 55 - 15; if (rollPhase > 1.1f) rollPhase = -1;
   }
   tx = constrain(tx, -120, 120); ty = constrain(ty, -100, 100);
+  {   // jelly inertia from linear acceleration (accel minus a slow gravity estimate)
+    slowGX = approach(slowGX, ax, 2.5f, dt); slowGY = approach(slowGY, ay, 2.5f, dt);
+    float lx2 = ax - slowGX, ly2 = ay - slowGY, mag = sqrtf(lx2 * lx2 + ly2 * ly2);
+    float k = clampf((mag - 0.15f) / 0.45f, 0, 1); k = k * k * (3 - 2 * k);   // only real wiggles count
+    // same mapping as gaze: the eyes swing opposite to the device's acceleration
+    float tX = clampf(rs * GAZE_SIGN_X * lx2 * 230 * k, -170, 170);
+    float tY = clampf(rs * GAZE_SIGN_Y * ly2 * 230 * k, -220, 220);
+    svlX += ((tX - sloshX) * 260 - svlX * 9) * dt;     // bouncy spring back to centre
+    svlY += ((tY - sloshY) * 260 - svlY * 9) * dt;
+    sloshX += svlX * dt; sloshY += svlY * dt;
+  }
   gvX += (tx - gazeX) * 220 * dt; gvY += (ty - gazeY) * 220 * dt;
   float damp = expf(-16 * dt); gvX *= damp; gvY *= damp; gazeX += gvX * dt; gazeY += gvY * dt;
 
